@@ -1,5 +1,6 @@
 import hashlib
 import json
+from datetime import datetime, timedelta
 
 import httpx
 import pytest
@@ -103,6 +104,19 @@ async def test_happy_path_marks_indexed_with_chunk_count(db, collection_id):
     assert doc["chunk_count"] == 1
     assert doc["error"] == ""
     assert doc["indexed_at"] is not None
+
+
+async def test_timestamps_carry_an_offset_on_every_read(db, collection_id):
+    # SQLite stores no timezone, so a row read back is naive unless the store
+    # says otherwise. The response that creates a document and every later read
+    # of it must not disagree about what its timestamps mean.
+    doc_id = await _add(db, collection_id, "## A\n\nbody\n")
+    await index_document(db, doc_id, embed=fake_embedder())
+    doc = await DocumentStore(db).get(doc_id)
+    for field in ("created_at", "indexed_at"):
+        parsed = datetime.fromisoformat(doc[field])
+        assert parsed.tzinfo is not None, f"{field} came back naive"
+        assert parsed.utcoffset() == timedelta(0)
 
 
 async def test_chunks_carry_heading_and_embedding(db, collection_id):

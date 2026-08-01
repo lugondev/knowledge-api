@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import func, select
 
@@ -109,6 +111,21 @@ class CollectionStore:
         )
 
 
+def _iso_utc(dt: datetime | None) -> str | None:
+    """Always an offset-bearing UTC string, whatever the driver handed back.
+
+    SQLite stores no timezone, so a row written as aware comes back naive. Left
+    alone, the same field is offset-bearing in the response that created it and
+    naive in every later read of it, and a client that parses the naive one as
+    local time is wrong by its own UTC offset.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC).isoformat()
+
+
 def _doc_dict(d: Document) -> dict:
     return {
         "id": d.id,
@@ -120,8 +137,8 @@ def _doc_dict(d: Document) -> dict:
         "status": d.status,
         "error": d.error,
         "chunk_count": d.chunk_count,
-        "created_at": d.created_at.isoformat(),
-        "indexed_at": d.indexed_at.isoformat() if d.indexed_at else None,
+        "created_at": _iso_utc(d.created_at),
+        "indexed_at": _iso_utc(d.indexed_at),
     }
 
 
