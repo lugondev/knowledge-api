@@ -72,6 +72,22 @@ class CollectionStore:
             await s.commit()
             return True
 
+    async def owns(self, tenant: str, collection_id: str) -> bool:
+        """Whether this tenant owns that collection id -- one query.
+
+        The alternative, listing the tenant's collections and resolving each one,
+        costs a query per collection on a path that runs on every document read.
+        """
+        async with self._db.session() as s:
+            found = (
+                await s.execute(
+                    select(Collection.id).where(
+                        Collection.id == collection_id, Collection.tenant == tenant
+                    )
+                )
+            ).scalar_one_or_none()
+            return found is not None
+
     @staticmethod
     async def _row(s, tenant: str, name: str) -> Collection | None:
         return (
