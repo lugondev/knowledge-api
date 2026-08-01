@@ -11,7 +11,16 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    JSON,
+    DateTime,
+    ForeignKey,
+    Integer,
+    LargeBinary,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -50,6 +59,8 @@ class Document(Base):
     mime: Mapped[str] = mapped_column(String(128), default="")
     sha256: Mapped[str] = mapped_column(String(64), index=True)
     bytes_len: Mapped[int] = mapped_column(Integer, default=0)
+    # Kept so a re-index does not require the operator to upload the file again.
+    data: Mapped[bytes] = mapped_column(LargeBinary, default=b"")
     status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
     error: Mapped[str] = mapped_column(Text, default="")
     chunk_count: Mapped[int] = mapped_column(Integer, default=0)
