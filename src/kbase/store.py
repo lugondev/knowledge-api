@@ -18,9 +18,7 @@ class CollectionStore:
         async with self._db.session() as s:
             row = (
                 await s.execute(
-                    select(Collection).where(
-                        Collection.tenant == tenant, Collection.name == name
-                    )
+                    select(Collection).where(Collection.tenant == tenant, Collection.name == name)
                 )
             ).scalar_one_or_none()
             if row is None:
@@ -32,15 +30,17 @@ class CollectionStore:
     async def list(self, tenant: str) -> list[dict]:
         async with self._db.session() as s:
             rows = (
-                await s.execute(
-                    select(Collection)
-                    .where(Collection.tenant == tenant)
-                    .order_by(Collection.name)
+                (
+                    await s.execute(
+                        select(Collection)
+                        .where(Collection.tenant == tenant)
+                        .order_by(Collection.name)
+                    )
                 )
-            ).scalars().all()
-            return [
-                {"name": r.name, "document_count": await self._count(s, r.id)} for r in rows
-            ]
+                .scalars()
+                .all()
+            )
+            return [{"name": r.name, "document_count": await self._count(s, r.id)} for r in rows]
 
     async def get(self, tenant: str, name: str) -> dict | None:
         async with self._db.session() as s:
@@ -61,10 +61,10 @@ class CollectionStore:
             if row is None:
                 return False
             doc_ids = (
-                await s.execute(
-                    select(Document.id).where(Document.collection_id == row.id)
-                )
-            ).scalars().all()
+                (await s.execute(select(Document.id).where(Document.collection_id == row.id)))
+                .scalars()
+                .all()
+            )
             if doc_ids:
                 await s.execute(sa_delete(Chunk).where(Chunk.document_id.in_(doc_ids)))
                 await s.execute(sa_delete(Document).where(Document.id.in_(doc_ids)))
@@ -187,8 +187,10 @@ class DocumentStore:
             if status:
                 stmt = stmt.where(Document.status == status)
             rows = (
-                await s.execute(stmt.order_by(Document.created_at.desc(), Document.id))
-            ).scalars().all()
+                (await s.execute(stmt.order_by(Document.created_at.desc(), Document.id)))
+                .scalars()
+                .all()
+            )
             return [_doc_dict(r) for r in rows]
 
     async def delete(self, document_id: str) -> bool:
@@ -204,12 +206,16 @@ class DocumentStore:
     async def chunks(self, document_id: str) -> list[dict]:
         async with self._db.session() as s:
             rows = (
-                await s.execute(
-                    select(Chunk)
-                    .where(Chunk.document_id == document_id)
-                    .order_by(Chunk.ordinal)
+                (
+                    await s.execute(
+                        select(Chunk)
+                        .where(Chunk.document_id == document_id)
+                        .order_by(Chunk.ordinal)
+                    )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
             return [
                 {
                     "id": c.id,

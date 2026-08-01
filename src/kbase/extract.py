@@ -17,9 +17,7 @@ def _suffix(filename: str) -> str:
 def extract_text(data: bytes, *, filename: str = "", mime: str = "") -> str:
     suffix = _suffix(filename)
     if suffix in _KNOWN_BINARY:
-        raise ExtractError(
-            f"{_KNOWN_BINARY[suffix]} files are not supported yet (planned for P2)"
-        )
+        raise ExtractError(f"{_KNOWN_BINARY[suffix]} files are not supported yet (planned for P2)")
     if suffix and suffix not in _TEXT_SUFFIXES and not mime.startswith("text/"):
         raise ExtractError(f"unsupported file type: {suffix}")
     try:

@@ -46,13 +46,16 @@ async def test_embedder_batches_and_sums_tokens():
         )
 
     embed = make_embedder(
-        base_url="http://x/v1", api_key="k", model="m", batch_size=2,
+        base_url="http://x/v1",
+        api_key="k",
+        model="m",
+        batch_size=2,
         transport=_transport(handler),
     )
     vectors, tokens = await embed(["a", "b", "c"])
-    assert seen == [2, 1]          # batched, not one giant request
+    assert seen == [2, 1]  # batched, not one giant request
     assert len(vectors) == 3
-    assert tokens == 14            # summed across batches, not taken from the last
+    assert tokens == 14  # summed across batches, not taken from the last
 
 
 async def test_embedder_preserves_input_order():
@@ -67,7 +70,10 @@ async def test_embedder_preserves_input_order():
         )
 
     embed = make_embedder(
-        base_url="http://x/v1", api_key="k", model="m", batch_size=2,
+        base_url="http://x/v1",
+        api_key="k",
+        model="m",
+        batch_size=2,
         transport=_transport(handler),
     )
     vectors, _ = await embed(["a", "bb", "ccc", "dddd"])
@@ -92,7 +98,10 @@ async def test_wrong_vector_count_is_an_error_not_a_silent_truncation():
         )
 
     embed = make_embedder(
-        base_url="http://x/v1", api_key="k", model="m", batch_size=8,
+        base_url="http://x/v1",
+        api_key="k",
+        model="m",
+        batch_size=8,
         transport=_transport(handler),
     )
     with pytest.raises(EmbeddingError):

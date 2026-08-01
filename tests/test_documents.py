@@ -102,7 +102,7 @@ def test_oversized_upload_is_rejected(client, acme):
     _make_collection(client, acme)
     r = client.post(
         "/v1/documents",
-        json={"collection": "faq", "text": "x" * 2000},   # KB_MAX_UPLOAD_BYTES=1000
+        json={"collection": "faq", "text": "x" * 2000},  # KB_MAX_UPLOAD_BYTES=1000
         headers=acme,
     )
     assert r.status_code == 413

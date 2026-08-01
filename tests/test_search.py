@@ -40,8 +40,12 @@ async def _seed(db, tenant: str, name: str, body: str) -> str:
     cid = await cols.resolve_id(tenant, name)
     data = body.encode()
     doc, _ = await DocumentStore(db).create(
-        cid, title="Sổ tay", filename="s.md", mime="text/markdown",
-        sha256=hashlib.sha256(data).hexdigest(), data=data,
+        cid,
+        title="Sổ tay",
+        filename="s.md",
+        mime="text/markdown",
+        sha256=hashlib.sha256(data).hexdigest(),
+        data=data,
     )
     await index_document(db, doc["id"], embed=keyword_embedder(VOCAB))
     return cid
@@ -53,9 +57,17 @@ def test_cosine_basics():
     assert cosine([0.0, 0.0], [1.0, 0.0]) == 0.0
 
 
+def test_cosine_of_mismatched_dimensions_is_zero_not_a_truncated_score():
+    # A chunk embedded by a since-replaced model must not keep winning top-k
+    # on the strength of its first few dimensions.
+    assert cosine([1.0, 0.0, 0.0], [1.0, 0.0]) == 0.0
+
+
 async def test_finds_the_relevant_chunk(db):
     cid = await _seed(
-        db, "acme", "faq",
+        db,
+        "acme",
+        "faq",
         "## Bảo hành\n\nbảo hành mười hai tháng.\n\n## Giao hàng\n\ngiao hàng 3 ngày.\n",
     )
     hits, tokens = await search_collection(
@@ -89,7 +101,9 @@ async def test_limit_is_respected(db):
 
 async def test_results_are_sorted_by_descending_score(db):
     cid = await _seed(
-        db, "acme", "faq",
+        db,
+        "acme",
+        "faq",
         "## A\n\nbảo hành đổi trả\n\n## B\n\nbảo hành\n",
     )
     hits, _ = await search_collection(

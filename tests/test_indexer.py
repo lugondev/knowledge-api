@@ -73,7 +73,10 @@ def half_failing_embedder():
         )
 
     return make_embedder(
-        base_url="http://x/v1", api_key="k", model="m", batch_size=32,
+        base_url="http://x/v1",
+        api_key="k",
+        model="m",
+        batch_size=32,
         transport=httpx.MockTransport(handler),
     )
 

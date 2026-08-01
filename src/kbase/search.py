@@ -17,7 +17,16 @@ from kbase.models import Chunk, Document
 
 
 def cosine(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
+    """0.0 for anything that cannot be compared, including a dimension mismatch.
+
+    Vectors of different length mean the embedding model changed under a corpus
+    that was indexed with the old one. Letting `zip` truncate would score those
+    chunks anyway, and the score would look entirely reasonable -- so a stale
+    chunk would keep winning top-k against queries it has nothing to do with.
+    """
+    if len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b, strict=True))
     na = math.sqrt(sum(x * x for x in a))
     nb = math.sqrt(sum(y * y for y in b))
     if na == 0.0 or nb == 0.0:

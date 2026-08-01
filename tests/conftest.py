@@ -20,13 +20,15 @@ def keyword_embedder(vocabulary=VOCAB):
 
 @pytest.fixture
 def settings(tmp_path):
-    return Settings.from_env({
-        "KB_API_KEYS": "acme-key:acme, globex-key:globex",
-        "KB_DATABASE_URL": f"sqlite+aiosqlite:///{tmp_path}/api.db",
-        "KB_EMBED_BASE_URL": "http://embed.invalid/v1",
-        "KB_EMBED_MODEL": "fake",
-        "KB_MAX_UPLOAD_BYTES": "1000",
-    })
+    return Settings.from_env(
+        {
+            "KB_API_KEYS": "acme-key:acme, globex-key:globex",
+            "KB_DATABASE_URL": f"sqlite+aiosqlite:///{tmp_path}/api.db",
+            "KB_EMBED_BASE_URL": "http://embed.invalid/v1",
+            "KB_EMBED_MODEL": "fake",
+            "KB_MAX_UPLOAD_BYTES": "1000",
+        }
+    )
 
 
 @pytest.fixture

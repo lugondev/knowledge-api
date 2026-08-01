@@ -45,9 +45,7 @@ async def index_document(
             return
         vectors, _tokens = await embed([p.text for p in pieces])
         if len(vectors) != len(pieces):
-            raise KbError(
-                f"embedder returned {len(vectors)} vectors for {len(pieces)} chunks"
-            )
+            raise KbError(f"embedder returned {len(vectors)} vectors for {len(pieces)} chunks")
         await docs.replace_chunks(
             document_id,
             [

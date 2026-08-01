@@ -56,9 +56,7 @@ async def create_collection(
 
 
 @router.get("/v1/collections")
-async def list_collections(
-    request: Request, tenant: str = Depends(require_tenant)
-) -> list[dict]:
+async def list_collections(request: Request, tenant: str = Depends(require_tenant)) -> list[dict]:
     cols, _ = _stores(request)
     return await cols.list(tenant)
 
@@ -107,9 +105,7 @@ async def create_document(
         try:
             payload = await request.json()
         except ValueError:
-            raise HTTPException(
-                status_code=422, detail="body must be JSON or multipart"
-            ) from None
+            raise HTTPException(status_code=422, detail="body must be JSON or multipart") from None
         body = CreateTextDocument.model_validate(payload)
         data = body.text.encode("utf-8")
         filename = "text.md"

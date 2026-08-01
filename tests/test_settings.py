@@ -38,9 +38,11 @@ def test_check_names_every_missing_requirement():
 
 
 def test_check_passes_on_a_complete_environment():
-    s = Settings.from_env({
-        "KB_API_KEYS": "aaa:acme",
-        "KB_EMBED_BASE_URL": "http://localhost:1234/v1",
-        "KB_EMBED_MODEL": "text-embedding-3-small",
-    })
+    s = Settings.from_env(
+        {
+            "KB_API_KEYS": "aaa:acme",
+            "KB_EMBED_BASE_URL": "http://localhost:1234/v1",
+            "KB_EMBED_MODEL": "text-embedding-3-small",
+        }
+    )
     assert s.check() == []

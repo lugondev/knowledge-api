@@ -30,6 +30,4 @@ def test_no_configured_keys_rejects_everything(tmp_path):
     # An unset KB_API_KEYS must lock the service, not open it.
     s = Settings.from_env({"KB_DATABASE_URL": f"sqlite+aiosqlite:///{tmp_path}/x.db"})
     with TestClient(create_app(s)) as c:
-        assert c.get(
-            "/v1/collections", headers={"Authorization": "Bearer any"}
-        ).status_code == 401
+        assert c.get("/v1/collections", headers={"Authorization": "Bearer any"}).status_code == 401

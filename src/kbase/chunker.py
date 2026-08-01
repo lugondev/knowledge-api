@@ -83,9 +83,7 @@ def _split_body(body: str, max_chars: int, overlap: int) -> list[str]:
     return out
 
 
-def chunk_markdown(
-    text: str, *, max_chars: int = 800, overlap: int = 100
-) -> list[ChunkPiece]:
+def chunk_markdown(text: str, *, max_chars: int = 800, overlap: int = 100) -> list[ChunkPiece]:
     pieces: list[ChunkPiece] = []
     for heading, body in _sections(text):
         for piece in _split_body(body, max_chars, overlap):
