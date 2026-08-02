@@ -6,6 +6,8 @@ from datetime import UTC, datetime
 
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import func, select
+from sqlalchemy import update as sa_update
+from sqlalchemy.exc import IntegrityError
 
 from kbase.db import Database
 from kbase.models import Chunk, Collection, Document, utcnow
@@ -26,7 +28,16 @@ class CollectionStore:
             if row is None:
                 row = Collection(tenant=tenant, name=name)
                 s.add(row)
-                await s.commit()
+                try:
+                    await s.commit()
+                except IntegrityError:
+                    # Two creates of the same name raced past the lookup above.
+                    # The endpoint is documented as idempotent, so the loser
+                    # returns the winner's row instead of a 500.
+                    await s.rollback()
+                    row = await self._row(s, tenant, name)
+                    if row is None:  # pragma: no cover - only if the constraint changed
+                        raise
             return {"name": row.name, "document_count": await self._count(s, row.id)}
 
     async def list(self, tenant: str) -> list[dict]:
@@ -180,7 +191,23 @@ class DocumentStore:
                 status="pending",
             )
             s.add(row)
-            await s.commit()
+            try:
+                await s.commit()
+            except IntegrityError:
+                # Two uploads of the same bytes in flight at once: both looked,
+                # both found nothing, both inserted. The unique constraint is what
+                # actually decides, and the loser reads the winner's row rather
+                # than turning an idempotent call into a 500.
+                await s.rollback()
+                existing = (
+                    await s.execute(
+                        select(Document).where(
+                            Document.collection_id == collection_id,
+                            Document.sha256 == sha256,
+                        )
+                    )
+                ).scalar_one()
+                return _doc_dict(existing), False
             return _doc_dict(row), True
 
     async def get(self, document_id: str) -> dict | None:
@@ -190,13 +217,18 @@ class DocumentStore:
 
     async def owner_collection_id(self, document_id: str) -> str | None:
         async with self._db.session() as s:
-            row = await s.get(Document, document_id)
-            return row.collection_id if row else None
+            return (
+                await s.execute(select(Document.collection_id).where(Document.id == document_id))
+            ).scalar_one_or_none()
 
     async def raw_bytes(self, document_id: str) -> bytes | None:
+        """The only caller that wants the file itself. `data` is a deferred
+        column, so it is selected explicitly here and nowhere else."""
         async with self._db.session() as s:
-            row = await s.get(Document, document_id)
-            return bytes(row.data) if row else None
+            row = (
+                await s.execute(select(Document.data).where(Document.id == document_id))
+            ).scalar_one_or_none()
+            return bytes(row) if row is not None else None
 
     async def list(self, collection_id: str, status: str | None = None) -> list[dict]:
         async with self._db.session() as s:
@@ -275,6 +307,22 @@ class DocumentStore:
             row.chunk_count = chunk_count
             row.indexed_at = utcnow()
             await s.commit()
+
+    async def fail_stale_pending(self, reason: str) -> int:
+        """Move every `pending` document to `failed`. Returns how many moved.
+
+        Called at startup only: nothing can legitimately be pending before the
+        first request of a process, so anything found here is work a previous
+        process was in the middle of when it died.
+        """
+        async with self._db.session() as s:
+            result = await s.execute(
+                sa_update(Document)
+                .where(Document.status == "pending")
+                .values(status="failed", error=reason[:2000], chunk_count=0)
+            )
+            await s.commit()
+            return result.rowcount or 0
 
     async def mark_failed(self, document_id: str, reason: str) -> None:
         async with self._db.session() as s:

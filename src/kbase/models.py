@@ -59,8 +59,10 @@ class Document(Base):
     mime: Mapped[str] = mapped_column(String(128), default="")
     sha256: Mapped[str] = mapped_column(String(64), index=True)
     bytes_len: Mapped[int] = mapped_column(Integer, default=0)
-    # Kept so a re-index does not require the operator to upload the file again.
-    data: Mapped[bytes] = mapped_column(LargeBinary, default=b"")
+    # Kept so a re-index does not require the operator to upload the file again,
+    # and deferred so that listing documents or checking one's owner does not
+    # drag every uploaded file through memory to read a status string.
+    data: Mapped[bytes] = mapped_column(LargeBinary, default=b"", deferred=True)
     status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
     error: Mapped[str] = mapped_column(Text, default="")
     chunk_count: Mapped[int] = mapped_column(Integer, default=0)

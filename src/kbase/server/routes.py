@@ -14,6 +14,7 @@ from fastapi import (
     Request,
     Response,
 )
+from pydantic import ValidationError
 
 # Starlette's, not FastAPI's: `request.form()` yields the base class, and
 # `fastapi.UploadFile` is a subclass of it, so an isinstance check against the
@@ -89,6 +90,18 @@ async def create_document(
     settings = request.app.state.settings
     content_type = (request.headers.get("content-type") or "").lower()
 
+    # Refuse on the declared length before reading anything. The check further
+    # down is the backstop -- Content-Length is absent under chunked transfer and
+    # a client is free to lie -- but without this one the limit only ever applies
+    # after the whole body has already been pulled into memory, which is the
+    # opposite of what a size limit is for.
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > settings.max_upload_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"document exceeds KB_MAX_UPLOAD_BYTES ({settings.max_upload_bytes})",
+        )
+
     if content_type.startswith("multipart/form-data"):
         form = await request.form()
         upload = form.get("file")
@@ -106,7 +119,14 @@ async def create_document(
             payload = await request.json()
         except ValueError:
             raise HTTPException(status_code=422, detail="body must be JSON or multipart") from None
-        body = CreateTextDocument.model_validate(payload)
+        try:
+            body = CreateTextDocument.model_validate(payload)
+        except ValidationError as exc:
+            # This route validates by hand, so pydantic's error is not the
+            # RequestValidationError FastAPI knows how to turn into a 422 -- left
+            # to escape, a body missing `text` is a 500 and reads like a service
+            # fault rather than a bad request.
+            raise HTTPException(status_code=422, detail=exc.errors(include_url=False)) from exc
         data = body.text.encode("utf-8")
         filename = "text.md"
         mime = "text/markdown"
