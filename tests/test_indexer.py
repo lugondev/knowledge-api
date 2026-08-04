@@ -133,9 +133,13 @@ async def test_embedding_failure_marks_failed_and_leaves_no_chunks(db, collectio
     docs = DocumentStore(db)
     doc = await docs.get(doc_id)
     assert doc["status"] == "failed"
-    assert "provider said no" in doc["error"]
     assert doc["chunk_count"] == 0
     assert await docs.chunks(doc_id) == []
+    # The tenant is told that indexing failed at the provider, not what the
+    # provider said: that message carries the embedding host, which is ours and
+    # is the same one for every tenant on the deployment.
+    assert "provider said no" not in doc["error"]
+    assert "embedding provider" in doc["error"]
 
 
 async def test_failure_midway_leaves_no_partial_index(db, collection_id):
@@ -169,11 +173,15 @@ async def test_unsupported_file_fails_that_document_only(db, collection_id):
     assert (await docs.get(good))["status"] == "indexed"
 
 
-async def test_empty_document_indexes_with_zero_chunks(db, collection_id):
+async def test_document_with_no_text_fails_rather_than_reporting_success(db, collection_id):
+    # `indexed` with zero chunks is a document that answers nothing and says so
+    # nowhere: every search against it comes back empty and the caller is left
+    # to guess whether that is the corpus or the query.
     doc_id = await _add(db, collection_id, "   \n\n  ")
     await index_document(db, doc_id, embed=fake_embedder())
     doc = await DocumentStore(db).get(doc_id)
-    assert doc["status"] == "indexed"
+    assert doc["status"] == "failed"
+    assert doc["error"] == "document contains no text to index"
     assert doc["chunk_count"] == 0
 
 

@@ -9,6 +9,7 @@ from fastapi import FastAPI
 
 from kbase.db import Database
 from kbase.embedding import Embedder, make_embedder
+from kbase.server.limits import MaxBodySize
 from kbase.server.routes import router
 from kbase.settings import Settings
 from kbase.store import DocumentStore
@@ -29,7 +30,8 @@ def create_app(settings: Settings, *, embedder: Embedder | None = None) -> FastA
         # database -- with several, a restarting instance would fail work that
         # another is still doing.
         swept = await DocumentStore(db).fail_stale_pending(
-            "indexing was interrupted by a restart; upload the document again"
+            "indexing was interrupted by a restart; upload it again or POST "
+            "/v1/documents/{id}/reindex"
         )
         if swept:
             logger.warning("marked %d interrupted document(s) as failed", swept)
@@ -48,6 +50,11 @@ def create_app(settings: Settings, *, embedder: Embedder | None = None) -> FastA
         redoc_url="/redoc" if settings.docs_enabled else None,
         openapi_url="/openapi.json" if settings.docs_enabled else None,
     )
+    # Outside the routes, because by the time a route runs, the body it is about
+    # to measure has already been read into the process. It raises an
+    # HTTPException, so the 413 needs no handler of its own.
+    app.add_middleware(MaxBodySize, max_bytes=settings.max_upload_bytes)
+
     app.state.settings = settings
     app.state.embedder = embedder or make_embedder(
         base_url=settings.embed_base_url,

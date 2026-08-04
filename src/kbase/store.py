@@ -73,14 +73,13 @@ class CollectionStore:
             row = await self._row(s, tenant, name)
             if row is None:
                 return False
-            doc_ids = (
-                (await s.execute(select(Document.id).where(Document.collection_id == row.id)))
-                .scalars()
-                .all()
-            )
-            if doc_ids:
-                await s.execute(sa_delete(Chunk).where(Chunk.document_id.in_(doc_ids)))
-                await s.execute(sa_delete(Document).where(Document.id.in_(doc_ids)))
+            # Subqueries rather than a list of ids: a collection with more
+            # documents than the driver's bind-parameter limit would otherwise
+            # fail to delete, and the limit is low enough on older SQLite to
+            # reach with an ordinary corpus.
+            owned = select(Document.id).where(Document.collection_id == row.id)
+            await s.execute(sa_delete(Chunk).where(Chunk.document_id.in_(owned)))
+            await s.execute(sa_delete(Document).where(Document.collection_id == row.id))
             await s.delete(row)
             await s.commit()
             return True
@@ -137,6 +136,14 @@ def _iso_utc(dt: datetime | None) -> str | None:
     return dt.astimezone(UTC).isoformat()
 
 
+def _reset(d: Document) -> None:
+    """Back to the state a freshly uploaded document is in."""
+    d.status = "pending"
+    d.error = ""
+    d.chunk_count = 0
+    d.indexed_at = None
+
+
 def _doc_dict(d: Document) -> dict:
     return {
         "id": d.id,
@@ -167,8 +174,15 @@ class DocumentStore:
         sha256: str,
         data: bytes,
     ) -> tuple[dict, bool]:
-        """Returns (document, created). `created is False` means these exact bytes
-        were already in this collection -- a retried upload, not a second copy."""
+        """Returns (document, accepted). `accepted is False` means these exact
+        bytes are already in this collection and nothing needs indexing.
+
+        A `failed` row is the exception: re-uploading the same bytes is a retry,
+        not a duplicate, and it comes back accepted so the caller schedules the
+        work again. Without that, the instruction this service writes onto its
+        own interrupted documents -- "upload the document again" -- did nothing,
+        and one transient outage at the provider stranded a document for good.
+        """
         async with self._db.session() as s:
             existing = (
                 await s.execute(
@@ -179,7 +193,7 @@ class DocumentStore:
                 )
             ).scalar_one_or_none()
             if existing is not None:
-                return _doc_dict(existing), False
+                return await self._retry_if_failed(s, existing)
             row = Document(
                 collection_id=collection_id,
                 title=title,
@@ -207,8 +221,33 @@ class DocumentStore:
                         )
                     )
                 ).scalar_one()
-                return _doc_dict(existing), False
+                return await self._retry_if_failed(s, existing)
             return _doc_dict(row), True
+
+    @staticmethod
+    async def _retry_if_failed(s, existing: Document) -> tuple[dict, bool]:
+        if existing.status != "failed":
+            return _doc_dict(existing), False
+        _reset(existing)
+        await s.commit()
+        return _doc_dict(existing), True
+
+    async def mark_pending(self, document_id: str) -> dict | None:
+        """Queue an existing document for another pass over its stored bytes.
+
+        Returns None if the document is gone, and the row untouched if it is
+        already pending -- two indexers racing over one document would each
+        replace the other's chunks and leave `chunk_count` describing neither.
+        """
+        async with self._db.session() as s:
+            row = await s.get(Document, document_id)
+            if row is None:
+                return None
+            if row.status == "pending":
+                return _doc_dict(row)
+            _reset(row)
+            await s.commit()
+            return _doc_dict(row)
 
     async def get(self, document_id: str) -> dict | None:
         async with self._db.session() as s:
@@ -281,8 +320,25 @@ class DocumentStore:
             await s.execute(sa_delete(Chunk).where(Chunk.document_id == document_id))
             await s.commit()
 
-    async def replace_chunks(self, document_id: str, rows: list[dict]) -> None:
+    async def replace_chunks(self, document_id: str, rows: list[dict]) -> bool:
+        """False when the document was deleted while it was being indexed.
+
+        Nothing else refuses the write. The schema carries no cascade on purpose
+        (see `models.py`) and SQLite does not enforce the foreign key, so the
+        insert would succeed against a document row that no longer exists. Search
+        joins Document, so those chunks never surface; deleting the collection
+        only reaches chunks whose document it can still see, so they are never
+        collected either. They would sit in the database for its whole life.
+
+        The check and the insert share one transaction, which is what makes it
+        an answer rather than a narrower window.
+        """
         async with self._db.session() as s:
+            still_there = (
+                await s.execute(select(Document.id).where(Document.id == document_id))
+            ).scalar_one_or_none()
+            if still_there is None:
+                return False
             await s.execute(sa_delete(Chunk).where(Chunk.document_id == document_id))
             for r in rows:
                 s.add(
@@ -296,6 +352,7 @@ class DocumentStore:
                     )
                 )
             await s.commit()
+            return True
 
     async def mark_indexed(self, document_id: str, chunk_count: int) -> None:
         async with self._db.session() as s:
@@ -314,12 +371,19 @@ class DocumentStore:
         Called at startup only: nothing can legitimately be pending before the
         first request of a process, so anything found here is work a previous
         process was in the middle of when it died.
+
+        Their chunks go too. A process that died between writing chunks and
+        marking the row leaves both behind, and the row is about to be told it
+        holds none -- so without this the count says zero while the rows sit
+        there, reachable by nothing and deleted by nothing.
         """
         async with self._db.session() as s:
+            stranded = select(Document.id).where(Document.status == "pending")
+            await s.execute(sa_delete(Chunk).where(Chunk.document_id.in_(stranded)))
             result = await s.execute(
                 sa_update(Document)
                 .where(Document.status == "pending")
-                .values(status="failed", error=reason[:2000], chunk_count=0)
+                .values(status="failed", error=reason[:2000], chunk_count=0, indexed_at=None)
             )
             await s.commit()
             return result.rowcount or 0

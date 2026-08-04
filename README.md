@@ -53,7 +53,26 @@ cite *Bảo hành > Đổi trả* rather than a floating paragraph.
 
 A document either indexes completely or is marked `failed` with a reason. There
 is no partial index: a document holding only its first third would answer
-questions from that third and never say the rest is missing.
+questions from that third and never say the rest is missing. A document with no
+text in it fails too, rather than reporting `indexed` with nothing to search.
+
+`failed` is never the end of the road. Uploading the same bytes again retries
+that document rather than reporting a duplicate, and `POST
+/v1/documents/{id}/reindex` runs it again from the copy already stored — which
+is also how to re-embed a corpus after changing `KB_EMBED_MODEL`, without
+holding any of it locally.
+
+The `error` a document carries is written for the tenant reading it. Anything
+describing the file they sent is quoted; anything describing this deployment —
+the embedding host, a driver's connection string — is not, and stays in the
+service log.
+
+Search scores every chunk in the collection, in a worker thread, a partition at
+a time: a search costs about 16 MB whether the collection holds a thousand
+chunks or a hundred thousand. It is still a linear scan, so it gets slower as the
+corpus grows — around 1.2 s over 10,000 chunks. Past 50,000 the log says so once
+per collection, and the answer at that point is a vector index rather than a
+larger machine.
 
 ## Configuration
 
@@ -76,8 +95,10 @@ DELETE /v1/collections/{name}
 
 POST   /v1/documents              multipart (file, collection, title?)
                                   or JSON {collection, title, text}
+                                  202 queued, 200 already indexed here
 GET    /v1/documents?collection=&status=
 GET    /v1/documents/{id}
+POST   /v1/documents/{id}/reindex index again from the stored bytes
 DELETE /v1/documents/{id}
 
 POST   /v1/search                 {collection, query, limit, min_score}

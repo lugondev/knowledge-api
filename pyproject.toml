@@ -9,6 +9,7 @@ description = "Documents in, retrievable chunks out"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+  "numpy>=1.26",
   "pydantic>=2.7",
   "sqlalchemy[asyncio]>=2.0",
   "aiosqlite>=0.20",

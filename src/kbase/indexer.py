@@ -14,11 +14,25 @@ import logging
 from kbase.chunker import chunk_markdown
 from kbase.db import Database
 from kbase.embedding import Embedder
-from kbase.errors import KbError
+from kbase.errors import EmbeddingError, KbError
 from kbase.extract import extract_text
 from kbase.store import DocumentStore
 
 logger = logging.getLogger(__name__)
+
+EMPTY_DOCUMENT = "document contains no text to index"
+
+
+def _tenant_reason(exc: BaseException) -> str:
+    """What goes on the row, as opposed to what goes in the log.
+
+    Anything not raised on purpose is reported without its own message: a driver
+    or library error carries connection strings, SQL, and hostnames, and every
+    one of them would otherwise be readable through `GET /v1/documents/{id}`.
+    """
+    if isinstance(exc, KbError):
+        return exc.safe_message
+    return "indexing failed unexpectedly; the service log has the detail"
 
 
 async def index_document(
@@ -40,13 +54,18 @@ async def index_document(
         text = extract_text(data, filename=doc["filename"], mime=doc["mime"])
         pieces = chunk_markdown(text, max_chars=max_chars, overlap=overlap)
         if not pieces:
+            # `indexed` with zero chunks reads as success and answers nothing:
+            # every search against it comes back empty, with no reason given
+            # anywhere. A document that cannot be searched was not indexed.
             await docs.drop_chunks(document_id)
-            await docs.mark_indexed(document_id, 0)
+            await docs.mark_failed(document_id, EMPTY_DOCUMENT)
             return
         vectors, _tokens = await embed([p.text for p in pieces])
         if len(vectors) != len(pieces):
-            raise KbError(f"embedder returned {len(vectors)} vectors for {len(pieces)} chunks")
-        await docs.replace_chunks(
+            raise EmbeddingError(
+                f"embedder returned {len(vectors)} vectors for {len(pieces)} chunks"
+            )
+        written = await docs.replace_chunks(
             document_id,
             [
                 {
@@ -58,8 +77,13 @@ async def index_document(
                 for p, v in zip(pieces, vectors, strict=True)
             ],
         )
+        if not written:
+            # Deleted while we were embedding. No row is left to mark, and the
+            # chunks were refused rather than written, so nothing is orphaned.
+            logger.info("document %s was deleted while it was being indexed", document_id)
+            return
         await docs.mark_indexed(document_id, len(pieces))
     except Exception as exc:  # noqa: BLE001 - the failure belongs on the row
-        logger.warning("indexing document %s failed: %s", document_id, exc)
+        logger.warning("indexing document %s failed: %s", document_id, exc, exc_info=True)
         await docs.drop_chunks(document_id)
-        await docs.mark_failed(document_id, str(exc))
+        await docs.mark_failed(document_id, _tenant_reason(exc))
