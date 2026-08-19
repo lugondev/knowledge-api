@@ -208,7 +208,9 @@ async def test_the_startup_sweep_takes_the_chunks_with_it(db, collection_id):
     doc_id = await _add(db, collection_id, "## A\n\nbody")
     docs = DocumentStore(db)
     await docs.replace_chunks(
-        doc_id, [{"ordinal": 0, "text": "body", "heading": "A", "embedding": [1.0, 0.0]}]
+        doc_id,
+        collection_id,
+        [{"ordinal": 0, "text": "body", "heading": "A", "embedding": [1.0, 0.0]}],
     )
     assert await _chunk_count(db) == 1
 
@@ -412,6 +414,7 @@ async def test_a_search_holds_one_partition_not_the_collection(db, collection_id
     doc_id = await _add(db, collection_id, "## A\n\nbody")
     await docs.replace_chunks(
         doc_id,
+        collection_id,
         [
             {"ordinal": i, "text": f"c{i}", "heading": "A", "embedding": [0.01] * dim}
             for i in range(PARTITION_SIZE * 8)
@@ -440,6 +443,7 @@ async def test_a_chunk_from_a_replaced_model_is_never_a_hit(db, collection_id):
     doc_id = await _add(db, collection_id, "## A\n\nbody")
     await docs.replace_chunks(
         doc_id,
+        collection_id,
         [
             {"ordinal": 0, "text": "stale", "heading": "A", "embedding": [1.0, 0.0, 0.0]},
             {"ordinal": 1, "text": "current", "heading": "A", "embedding": [1.0, 0.0]},

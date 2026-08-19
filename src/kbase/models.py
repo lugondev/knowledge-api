@@ -75,6 +75,11 @@ class Chunk(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     document_id: Mapped[str] = mapped_column(ForeignKey("documents.id"), index=True)
+    # Denormalized from the owning document so a vector search filters on one
+    # table. Under an ANN index a filter that lives on a joined table forces
+    # over-fetch and post-filter, and recall drops exactly when the collection
+    # is large enough to have needed the index.
+    collection_id: Mapped[str] = mapped_column(String(36), index=True, default="")
     ordinal: Mapped[int] = mapped_column(Integer)
     text: Mapped[str] = mapped_column(Text)
     heading: Mapped[str] = mapped_column(String(512), default="")

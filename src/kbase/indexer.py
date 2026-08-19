@@ -65,8 +65,13 @@ async def index_document(
             raise EmbeddingError(
                 f"embedder returned {len(vectors)} vectors for {len(pieces)} chunks"
             )
+        collection_id = await docs.owner_collection_id(document_id)
+        if collection_id is None:
+            logger.info("document %s was deleted while it was being indexed", document_id)
+            return
         written = await docs.replace_chunks(
             document_id,
+            collection_id,
             [
                 {
                     "ordinal": p.ordinal,

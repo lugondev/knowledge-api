@@ -320,7 +320,9 @@ class DocumentStore:
             await s.execute(sa_delete(Chunk).where(Chunk.document_id == document_id))
             await s.commit()
 
-    async def replace_chunks(self, document_id: str, rows: list[dict]) -> bool:
+    async def replace_chunks(
+        self, document_id: str, collection_id: str, rows: list[dict]
+    ) -> bool:
         """False when the document was deleted while it was being indexed.
 
         Nothing else refuses the write. The schema carries no cascade on purpose
@@ -344,6 +346,7 @@ class DocumentStore:
                 s.add(
                     Chunk(
                         document_id=document_id,
+                        collection_id=collection_id,
                         ordinal=r["ordinal"],
                         text=r["text"],
                         heading=r["heading"],
