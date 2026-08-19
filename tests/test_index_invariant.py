@@ -6,6 +6,7 @@ import hashlib
 
 import pytest
 from sqlalchemy import update as sa_update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from kbase.db import Database
 from kbase.index import SqlScanIndex
@@ -112,6 +113,34 @@ async def test_finish_indexing_flips_status_and_writes_chunks_together(db, index
     assert after["status"] == "indexed"
     assert after["chunk_count"] == 1
     assert len(await index.chunks(doc_id)) == 1
+
+
+async def test_finish_indexing_commits_exactly_once(db, index, monkeypatch):
+    """The one-commit property is the whole point of `finish_indexing` (see its
+    docstring): status and chunks must never be observable mid-flip. A second
+    commit slipped in between the write and the flip would reopen exactly the
+    window Task 2 closed, and nothing about the end state -- which is all
+    `test_finish_indexing_flips_status_and_writes_chunks_together` checks --
+    would tell the difference. This counts commits instead.
+    """
+    docs, doc_id, cid = await _pending_document(db, index)
+    rows = [
+        {"ordinal": 0, "text": "some text", "heading": "Heading", "embedding": [1.0, 0.0, 0.0]}
+    ]
+
+    calls = {"n": 0}
+    original_commit = AsyncSession.commit
+
+    async def counting_commit(self):
+        calls["n"] += 1
+        return await original_commit(self)
+
+    monkeypatch.setattr(AsyncSession, "commit", counting_commit)
+
+    ok = await docs.finish_indexing(doc_id, cid, rows)
+
+    assert ok is True
+    assert calls["n"] == 1
 
 
 async def test_finish_indexing_returns_false_when_document_was_deleted(db, index):

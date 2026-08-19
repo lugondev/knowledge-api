@@ -1,23 +1,16 @@
-"""Embed the query, score every chunk in the collection, apply the floor.
+"""The cosine-scoring primitives `SqlScanIndex.query` (in `index.py`) scans with.
 
-On SQLite this is a scan, which is what the corpus this service is built for
-actually needs. The interface is the seam a pgvector implementation slots into
-later without any caller noticing.
+`cosine` and `_score_batch` do the arithmetic; neither holds a database session
+or knows about partitions or scans -- that shape lives in `index.py`, which
+calls `_score_batch` off the event loop in a worker thread, because it is the
+one genuinely CPU-bound stretch in an otherwise IO-bound process. Scored
+inline, a collection of 8,000 chunks stalled every other request in the
+process -- `/healthz` included, which is what the container's healthcheck
+polls -- for 0.65 s at a time. Off the loop it is 0.08 s.
 
-Two things keep that scan from taking the process down with it as a collection
-grows.
-
-Rows arrive a partition at a time rather than all at once, so the memory a search
-holds is set by the partition and not by the collection. Read in one list, 3,000
-chunks of 1,536 dimensions cost about 180 MB of Python floats to return five
-hits, and 6,000 cost twice that; a partition at a time it is 16 MB for any of
-them.
-
-And the arithmetic runs in a worker thread, because it is the one genuinely
-CPU-bound stretch in an otherwise IO-bound process. Scored inline, a collection
-of 8,000 chunks stalled every other request in the process -- `/healthz`
-included, which is what the container's healthcheck polls -- for 0.65 s at a
-time. Off the loop it is 0.08 s.
+`PARTITION_SIZE` and `warn_if_large` live here too, alongside the arithmetic
+they size and gate, so a second `ChunkIndex` implementation that scans can
+reuse the same numbers instead of picking its own.
 """
 
 from __future__ import annotations

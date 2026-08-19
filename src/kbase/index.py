@@ -112,6 +112,9 @@ class SqlScanIndex:
         stmt = (
             select(Chunk, Document)
             .join(Document, Chunk.document_id == Document.id)
+            # No `status` predicate: a chunk only exists for an indexed document
+            # (see store.mark_pending / indexer's failure path). The join is here
+            # for the title and filename in the payload, not to filter.
             .where(Chunk.collection_id == collection_id)
             .execution_options(yield_per=PARTITION_SIZE)
         )
@@ -135,6 +138,8 @@ class SqlScanIndex:
                     for chunk, doc in partition
                 ]
                 hits = await asyncio.to_thread(_score_batch, vec, qnorm, batch, min_score, limit)
+                # The scan position breaks ties, so equal scores come back in the
+                # order they were read and the same query answers the same way twice.
                 best.extend(
                     (score, scanned + i, payload) for i, (score, payload) in enumerate(hits)
                 )

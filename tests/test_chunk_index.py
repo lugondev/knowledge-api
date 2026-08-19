@@ -6,6 +6,7 @@ import pytest
 
 from kbase.db import Database
 from kbase.index import SqlScanIndex
+from kbase.search import PARTITION_SIZE
 from kbase.store import CollectionStore, DocumentStore
 
 
@@ -110,3 +111,68 @@ async def test_deleting_the_collection_removes_its_chunks(db, index):
     await CollectionStore(db, index).delete("acme", "faq")
 
     assert await index.chunks(doc_id) == []
+
+
+async def test_a_zero_vector_query_never_touches_the_database(db, index, monkeypatch):
+    # A zero vector has no direction to be close to anything, and dividing by
+    # its norm is undefined -- the early return has to fire before a session
+    # is ever opened. Asserting only the empty result would not catch its
+    # removal: every score comes back NaN in that case, and NaN >= min_score
+    # is False regardless of the floor, so the query would still (accidentally)
+    # answer empty -- just after opening a session and scanning every chunk.
+    cid = await _collection(db, index)
+    docs, doc_id = await _document(db, index, cid, "f" * 64)
+    await docs.replace_chunks(
+        doc_id, cid, [{"ordinal": 0, "text": "anything", "heading": "", "embedding": [1.0, 0.0]}]
+    )
+    await docs.mark_indexed(doc_id, 1)
+
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("a zero-vector query must return before opening a session")
+
+    monkeypatch.setattr(db, "session", refuse)
+
+    assert await index.query(cid, [0.0, 0.0], limit=5, min_score=0.0) == []
+
+
+async def test_tied_scores_break_by_scan_position_the_same_way_twice(db, index):
+    # Equal scores must not come back in an arbitrary order: the same query
+    # against the same corpus has to answer the same way every time, which is
+    # only true if ties are broken by something stable -- the order the rows
+    # were read in, not, say, an unstable sort or a reversed tiebreaker.
+    cid = await _collection(db, index)
+    docs, doc_id = await _document(db, index, cid, "g" * 64)
+    await docs.replace_chunks(
+        doc_id,
+        cid,
+        [
+            {"ordinal": i, "text": f"tied-{i}", "heading": "", "embedding": [1.0, 0.0]}
+            for i in range(5)
+        ],
+    )
+    await docs.mark_indexed(doc_id, 5)
+
+    first = await index.query(cid, [1.0, 0.0], limit=5, min_score=0.0)
+    second = await index.query(cid, [1.0, 0.0], limit=5, min_score=0.0)
+
+    order = [h["text"] for h in first]
+    assert order == [h["text"] for h in second]
+    assert order == [f"tied-{i}" for i in range(5)]
+
+
+async def test_limit_holds_across_partitions_not_only_within_one(db, index):
+    # PARTITION_SIZE is 128: fewer chunks than that exercises only one
+    # partition, where `_score_batch`'s own per-partition cap already trims
+    # to `limit` and would hide a broken cross-partition cap entirely.
+    cid = await _collection(db, index)
+    docs, doc_id = await _document(db, index, cid, "h" * 64)
+    n = PARTITION_SIZE * 2 + 50
+    rows = [
+        {"ordinal": i, "text": f"c{i}", "heading": "", "embedding": [1.0, 0.0]} for i in range(n)
+    ]
+    await docs.replace_chunks(doc_id, cid, rows)
+    await docs.mark_indexed(doc_id, n)
+
+    hits = await index.query(cid, [1.0, 0.0], limit=5, min_score=0.0)
+
+    assert len(hits) == 5
