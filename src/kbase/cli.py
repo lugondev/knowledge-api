@@ -16,6 +16,8 @@ from kbase.settings import Settings
 
 def _doctor(settings: Settings) -> int:
     problems = settings.check()
+    for w in settings.warnings():
+        print(f"warning: {w}")
     if not problems:
         print("ok: configuration is complete")
         return 0

@@ -8,6 +8,11 @@ from dataclasses import dataclass, field
 DEFAULT_DATABASE_URL = "sqlite+aiosqlite:///./kbase.db"
 DEFAULT_MAX_UPLOAD_BYTES = 20_000_000
 
+#: pgvector will not build an HNSW index on a wider vector. Above this a column
+#: still stores and still searches -- by scanning, which is the thing pgvector
+#: was brought in to stop doing.
+HNSW_MAX_DIMENSIONS = 2000
+
 
 def _parse_api_keys(raw: str) -> dict[str, str]:
     """`key:tenant,key:tenant` -> {key: tenant}.
@@ -37,6 +42,7 @@ class Settings:
     embed_model: str = ""
     max_upload_bytes: int = DEFAULT_MAX_UPLOAD_BYTES
     docs_enabled: bool = True
+    embed_dim: int = 0
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> Settings:
@@ -45,6 +51,11 @@ class Settings:
             max_upload = int(raw_max) if raw_max else DEFAULT_MAX_UPLOAD_BYTES
         except ValueError:
             max_upload = DEFAULT_MAX_UPLOAD_BYTES
+        raw_dim = env.get("KB_EMBED_DIM", "").strip()
+        try:
+            embed_dim = int(raw_dim) if raw_dim else 0
+        except ValueError:
+            embed_dim = -1  # invalid, and `check` says so rather than guessing
         return cls(
             api_keys=_parse_api_keys(env.get("KB_API_KEYS", "")),
             database_url=env.get("KB_DATABASE_URL", "").strip() or DEFAULT_DATABASE_URL,
@@ -53,6 +64,7 @@ class Settings:
             embed_model=env.get("KB_EMBED_MODEL", "").strip(),
             max_upload_bytes=max_upload,
             docs_enabled=env.get("KB_DOCS", "").strip().lower() not in {"false", "0", "no"},
+            embed_dim=embed_dim,
         )
 
     def check(self) -> list[str]:
@@ -66,4 +78,22 @@ class Settings:
             problems.append("KB_EMBED_MODEL is unset: nothing can be indexed or searched")
         if self.max_upload_bytes <= 0:
             problems.append("KB_MAX_UPLOAD_BYTES must be a positive integer")
+        if self.embed_dim < 0:
+            problems.append("KB_EMBED_DIM must be a positive integer")
         return problems
+
+    def warnings(self) -> list[str]:
+        """Things worth saying that are not reasons to refuse to start."""
+        notes: list[str] = []
+        if self.database_url.startswith("postgresql") and self.embed_dim == 0:
+            notes.append(
+                "KB_EMBED_DIM is unset on a Postgres database: every search will "
+                "scan the collection rather than use a vector index"
+            )
+        if self.embed_dim > HNSW_MAX_DIMENSIONS:
+            notes.append(
+                f"KB_EMBED_DIM is {self.embed_dim}: pgvector builds no HNSW index above "
+                f"{HNSW_MAX_DIMENSIONS} dimensions, so searches will scan. Reduce the "
+                "model's output width instead"
+            )
+        return notes

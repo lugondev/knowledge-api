@@ -46,3 +46,40 @@ def test_check_passes_on_a_complete_environment():
         }
     )
     assert s.check() == []
+
+
+def test_embed_dim_defaults_to_zero_when_unset():
+    s = Settings.from_env({})
+    assert s.embed_dim == 0
+
+
+def test_a_non_numeric_embed_dim_is_a_problem_not_a_guess():
+    s = Settings.from_env({"KB_EMBED_DIM": "large"})
+    assert any("KB_EMBED_DIM" in p for p in s.check())
+
+
+def test_postgres_without_a_dimension_warns_that_it_will_scan():
+    s = Settings.from_env(
+        {
+            "KB_API_KEYS": "k:acme",
+            "KB_DATABASE_URL": "postgresql+asyncpg://u:p@h/db",
+            "KB_EMBED_BASE_URL": "http://e/v1",
+            "KB_EMBED_MODEL": "m",
+        }
+    )
+    assert s.check() == []
+    assert any("scan" in w for w in s.warnings())
+
+
+def test_a_dimension_over_the_hnsw_ceiling_warns_but_starts():
+    s = Settings.from_env(
+        {
+            "KB_API_KEYS": "k:acme",
+            "KB_DATABASE_URL": "postgresql+asyncpg://u:p@h/db",
+            "KB_EMBED_BASE_URL": "http://e/v1",
+            "KB_EMBED_MODEL": "m",
+            "KB_EMBED_DIM": "3072",
+        }
+    )
+    assert s.check() == []
+    assert any("2000" in w for w in s.warnings())
