@@ -9,6 +9,7 @@ from fastapi import FastAPI
 
 from kbase.db import Database
 from kbase.embedding import Embedder, make_embedder
+from kbase.index import SqlScanIndex
 from kbase.server.limits import MaxBodySize
 from kbase.server.routes import router
 from kbase.settings import Settings
@@ -23,13 +24,16 @@ def create_app(settings: Settings, *, embedder: Embedder | None = None) -> FastA
         db = Database(settings.database_url)
         await db.create_all()
         app.state.db = db
+        index = SqlScanIndex(db)
+        await index.create_schema()
+        app.state.index = index
         # Indexing runs in a background task, so a restart mid-index leaves a
         # document `pending` with nothing left to move it along. Left alone it
         # stays pending forever: the operator sees "still working" and waits for
         # something that is never going to happen. Assumes one instance per
         # database -- with several, a restarting instance would fail work that
         # another is still doing.
-        swept = await DocumentStore(db).fail_stale_pending(
+        swept = await DocumentStore(db, index).fail_stale_pending(
             "indexing was interrupted by a restart; upload it again or POST "
             "/v1/documents/{id}/reindex"
         )

@@ -8,6 +8,7 @@ import pytest
 from kbase.db import Database
 from kbase.embedding import make_embedder
 from kbase.errors import EmbeddingError
+from kbase.index import SqlScanIndex
 from kbase.indexer import index_document
 from kbase.store import CollectionStore, DocumentStore
 
@@ -21,8 +22,13 @@ async def db(tmp_path):
 
 
 @pytest.fixture
-async def collection_id(db):
-    store = CollectionStore(db)
+def index(db):
+    return SqlScanIndex(db)
+
+
+@pytest.fixture
+async def collection_id(db, index):
+    store = CollectionStore(db, index)
     await store.create("acme", "faq")
     return await store.resolve_id("acme", "faq")
 
@@ -82,9 +88,9 @@ def half_failing_embedder():
     )
 
 
-async def _add(db, collection_id, text: str, filename="a.md"):
+async def _add(db, index, collection_id, text: str, filename="a.md"):
     data = text.encode()
-    docs = DocumentStore(db)
+    docs = DocumentStore(db, index)
     doc, _created = await docs.create(
         collection_id,
         title="t",
@@ -96,45 +102,45 @@ async def _add(db, collection_id, text: str, filename="a.md"):
     return doc["id"]
 
 
-async def test_happy_path_marks_indexed_with_chunk_count(db, collection_id):
-    doc_id = await _add(db, collection_id, "## Bảo hành\n\nMười hai tháng.\n")
-    await index_document(db, doc_id, embed=fake_embedder())
-    doc = await DocumentStore(db).get(doc_id)
+async def test_happy_path_marks_indexed_with_chunk_count(db, index, collection_id):
+    doc_id = await _add(db, index, collection_id, "## Bảo hành\n\nMười hai tháng.\n")
+    await index_document(db, index, doc_id, embed=fake_embedder())
+    doc = await DocumentStore(db, index).get(doc_id)
     assert doc["status"] == "indexed"
     assert doc["chunk_count"] == 1
     assert doc["error"] == ""
     assert doc["indexed_at"] is not None
 
 
-async def test_timestamps_carry_an_offset_on_every_read(db, collection_id):
+async def test_timestamps_carry_an_offset_on_every_read(db, index, collection_id):
     # SQLite stores no timezone, so a row read back is naive unless the store
     # says otherwise. The response that creates a document and every later read
     # of it must not disagree about what its timestamps mean.
-    doc_id = await _add(db, collection_id, "## A\n\nbody\n")
-    await index_document(db, doc_id, embed=fake_embedder())
-    doc = await DocumentStore(db).get(doc_id)
+    doc_id = await _add(db, index, collection_id, "## A\n\nbody\n")
+    await index_document(db, index, doc_id, embed=fake_embedder())
+    doc = await DocumentStore(db, index).get(doc_id)
     for field in ("created_at", "indexed_at"):
         parsed = datetime.fromisoformat(doc[field])
         assert parsed.tzinfo is not None, f"{field} came back naive"
         assert parsed.utcoffset() == timedelta(0)
 
 
-async def test_chunks_carry_heading_and_embedding(db, collection_id):
-    doc_id = await _add(db, collection_id, "## Bảo hành\n\nMười hai tháng.\n")
-    await index_document(db, doc_id, embed=fake_embedder())
-    rows = await DocumentStore(db).chunks(doc_id)
+async def test_chunks_carry_heading_and_embedding(db, index, collection_id):
+    doc_id = await _add(db, index, collection_id, "## Bảo hành\n\nMười hai tháng.\n")
+    await index_document(db, index, doc_id, embed=fake_embedder())
+    rows = await index.chunks(doc_id)
     assert rows[0]["heading"] == "Bảo hành"
     assert len(rows[0]["embedding"]) == 3
 
 
-async def test_embedding_failure_marks_failed_and_leaves_no_chunks(db, collection_id):
-    doc_id = await _add(db, collection_id, "## A\n\nbody\n")
-    await index_document(db, doc_id, embed=failing_embedder())
-    docs = DocumentStore(db)
+async def test_embedding_failure_marks_failed_and_leaves_no_chunks(db, index, collection_id):
+    doc_id = await _add(db, index, collection_id, "## A\n\nbody\n")
+    await index_document(db, index, doc_id, embed=failing_embedder())
+    docs = DocumentStore(db, index)
     doc = await docs.get(doc_id)
     assert doc["status"] == "failed"
     assert doc["chunk_count"] == 0
-    assert await docs.chunks(doc_id) == []
+    assert await index.chunks(doc_id) == []
     # The tenant is told that indexing failed at the provider, not what the
     # provider said: that message carries the embedding host, which is ours and
     # is the same one for every tenant on the deployment.
@@ -142,57 +148,57 @@ async def test_embedding_failure_marks_failed_and_leaves_no_chunks(db, collectio
     assert "embedding provider" in doc["error"]
 
 
-async def test_failure_midway_leaves_no_partial_index(db, collection_id):
+async def test_failure_midway_leaves_no_partial_index(db, index, collection_id):
     # A document that reports `indexed` while holding only the first third of the
     # manual answers questions from that third and never says it is incomplete.
     body = "\n\n".join(f"Đoạn {i} " + "x" * 700 for i in range(80))
-    doc_id = await _add(db, collection_id, body)
-    await index_document(db, doc_id, embed=half_failing_embedder())
-    docs = DocumentStore(db)
+    doc_id = await _add(db, index, collection_id, body)
+    await index_document(db, index, doc_id, embed=half_failing_embedder())
+    docs = DocumentStore(db, index)
     doc = await docs.get(doc_id)
     assert doc["status"] == "failed"
-    assert await docs.chunks(doc_id) == []
+    assert await index.chunks(doc_id) == []
 
 
-async def test_short_vector_reply_fails_instead_of_indexing_a_prefix(db, collection_id):
+async def test_short_vector_reply_fails_instead_of_indexing_a_prefix(db, index, collection_id):
     body = "\n\n".join(f"Đoạn {i} " + "x" * 700 for i in range(5))
-    doc_id = await _add(db, collection_id, body)
-    await index_document(db, doc_id, embed=short_reply_embedder())
-    docs = DocumentStore(db)
+    doc_id = await _add(db, index, collection_id, body)
+    await index_document(db, index, doc_id, embed=short_reply_embedder())
+    docs = DocumentStore(db, index)
     assert (await docs.get(doc_id))["status"] == "failed"
-    assert await docs.chunks(doc_id) == []
+    assert await index.chunks(doc_id) == []
 
 
-async def test_unsupported_file_fails_that_document_only(db, collection_id):
-    bad = await _add(db, collection_id, "irrelevant", filename="manual.pdf")
-    good = await _add(db, collection_id, "## A\n\nbody\n", filename="ok.md")
-    await index_document(db, bad, embed=fake_embedder())
-    await index_document(db, good, embed=fake_embedder())
-    docs = DocumentStore(db)
+async def test_unsupported_file_fails_that_document_only(db, index, collection_id):
+    bad = await _add(db, index, collection_id, "irrelevant", filename="manual.pdf")
+    good = await _add(db, index, collection_id, "## A\n\nbody\n", filename="ok.md")
+    await index_document(db, index, bad, embed=fake_embedder())
+    await index_document(db, index, good, embed=fake_embedder())
+    docs = DocumentStore(db, index)
     assert (await docs.get(bad))["status"] == "failed"
     assert (await docs.get(good))["status"] == "indexed"
 
 
-async def test_document_with_no_text_fails_rather_than_reporting_success(db, collection_id):
+async def test_document_with_no_text_fails_rather_than_reporting_success(db, index, collection_id):
     # `indexed` with zero chunks is a document that answers nothing and says so
     # nowhere: every search against it comes back empty and the caller is left
     # to guess whether that is the corpus or the query.
-    doc_id = await _add(db, collection_id, "   \n\n  ")
-    await index_document(db, doc_id, embed=fake_embedder())
-    doc = await DocumentStore(db).get(doc_id)
+    doc_id = await _add(db, index, collection_id, "   \n\n  ")
+    await index_document(db, index, doc_id, embed=fake_embedder())
+    doc = await DocumentStore(db, index).get(doc_id)
     assert doc["status"] == "failed"
     assert doc["error"] == "document contains no text to index"
     assert doc["chunk_count"] == 0
 
 
-async def test_reindex_replaces_rather_than_appends(db, collection_id):
-    doc_id = await _add(db, collection_id, "## A\n\nbody\n")
-    await index_document(db, doc_id, embed=fake_embedder())
-    await index_document(db, doc_id, embed=fake_embedder())
-    docs = DocumentStore(db)
+async def test_reindex_replaces_rather_than_appends(db, index, collection_id):
+    doc_id = await _add(db, index, collection_id, "## A\n\nbody\n")
+    await index_document(db, index, doc_id, embed=fake_embedder())
+    await index_document(db, index, doc_id, embed=fake_embedder())
+    docs = DocumentStore(db, index)
     assert (await docs.get(doc_id))["chunk_count"] == 1
-    assert len(await docs.chunks(doc_id)) == 1
+    assert len(await index.chunks(doc_id)) == 1
 
 
-async def test_missing_document_is_a_no_op_not_a_crash(db):
-    await index_document(db, "does-not-exist", embed=fake_embedder())
+async def test_missing_document_is_a_no_op_not_a_crash(db, index):
+    await index_document(db, index, "does-not-exist", embed=fake_embedder())

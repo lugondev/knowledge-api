@@ -14,9 +14,10 @@ from sqlalchemy import func, select
 
 from kbase.db import Database
 from kbase.errors import EmbeddingError
+from kbase.index import SqlScanIndex
 from kbase.indexer import index_document
 from kbase.models import Chunk
-from kbase.search import PARTITION_SIZE, search_collection
+from kbase.search import PARTITION_SIZE
 from kbase.server.app import create_app
 from kbase.settings import Settings
 from kbase.store import CollectionStore, DocumentStore
@@ -32,15 +33,20 @@ async def db(tmp_path):
 
 
 @pytest.fixture
-async def collection_id(db):
-    cols = CollectionStore(db)
+def index(db):
+    return SqlScanIndex(db)
+
+
+@pytest.fixture
+async def collection_id(db, index):
+    cols = CollectionStore(db, index)
     await cols.create("acme", "faq")
     return await cols.resolve_id("acme", "faq")
 
 
-async def _add(db, collection_id, text: str, filename: str = "a.md") -> str:
+async def _add(db, index, collection_id, text: str, filename: str = "a.md") -> str:
     data = text.encode()
-    doc, _ = await DocumentStore(db).create(
+    doc, _ = await DocumentStore(db, index).create(
         collection_id,
         title="t",
         filename=filename,
@@ -74,12 +80,12 @@ def _failing_embedder(message: str = "Client error '401' for url 'https://embed.
 # --- 1. a failed document must be retryable ---------------------------------
 
 
-async def test_reuploading_the_same_bytes_retries_a_failed_document(db, collection_id):
+async def test_reuploading_the_same_bytes_retries_a_failed_document(db, index, collection_id):
     # The message this service writes onto its own interrupted documents is
     # "upload it again". That has to actually do something.
-    doc_id = await _add(db, collection_id, "## A\n\nbody")
-    await index_document(db, doc_id, embed=_failing_embedder())
-    docs = DocumentStore(db)
+    doc_id = await _add(db, index, collection_id, "## A\n\nbody")
+    await index_document(db, index, doc_id, embed=_failing_embedder())
+    docs = DocumentStore(db, index)
     assert (await docs.get(doc_id))["status"] == "failed"
 
     same_bytes = b"## A\n\nbody"
@@ -97,10 +103,10 @@ async def test_reuploading_the_same_bytes_retries_a_failed_document(db, collecti
     assert doc["error"] == ""
 
 
-async def test_reuploading_an_indexed_document_is_still_a_duplicate(db, collection_id):
-    doc_id = await _add(db, collection_id, "## A\n\nbody")
-    await index_document(db, doc_id, embed=keyword_embedder())
-    docs = DocumentStore(db)
+async def test_reuploading_an_indexed_document_is_still_a_duplicate(db, index, collection_id):
+    doc_id = await _add(db, index, collection_id, "## A\n\nbody")
+    await index_document(db, index, doc_id, embed=keyword_embedder())
+    docs = DocumentStore(db, index)
     same_bytes = b"## A\n\nbody"
     _doc, accepted = await docs.create(
         collection_id,
@@ -180,33 +186,33 @@ def test_reindex_endpoint_reuses_the_stored_bytes(tmp_path, acme, globex):
 # --- 3. no chunk outlives the document it belongs to ------------------------
 
 
-async def test_deleting_a_document_mid_index_leaves_no_orphan_chunks(db, collection_id):
-    doc_id = await _add(db, collection_id, "## A\n\nbody one\n\n## B\n\nbody two")
+async def test_deleting_a_document_mid_index_leaves_no_orphan_chunks(db, index, collection_id):
+    doc_id = await _add(db, index, collection_id, "## A\n\nbody one\n\n## B\n\nbody two")
     gate = asyncio.Event()
-    task = asyncio.create_task(index_document(db, doc_id, embed=_held_embedder(gate)))
+    task = asyncio.create_task(index_document(db, index, doc_id, embed=_held_embedder(gate)))
     await asyncio.sleep(0.05)
-    await DocumentStore(db).delete(doc_id)
+    await DocumentStore(db, index).delete(doc_id)
     gate.set()
     await task
     assert await _chunk_count(db) == 0
 
 
-async def test_deleting_a_collection_mid_index_leaves_no_orphan_chunks(db, collection_id):
-    doc_id = await _add(db, collection_id, "## A\n\nbody one\n\n## B\n\nbody two")
+async def test_deleting_a_collection_mid_index_leaves_no_orphan_chunks(db, index, collection_id):
+    doc_id = await _add(db, index, collection_id, "## A\n\nbody one\n\n## B\n\nbody two")
     gate = asyncio.Event()
-    task = asyncio.create_task(index_document(db, doc_id, embed=_held_embedder(gate)))
+    task = asyncio.create_task(index_document(db, index, doc_id, embed=_held_embedder(gate)))
     await asyncio.sleep(0.05)
-    assert await CollectionStore(db).delete("acme", "faq") is True
+    assert await CollectionStore(db, index).delete("acme", "faq") is True
     gate.set()
     await task
     assert await _chunk_count(db) == 0
 
 
-async def test_the_startup_sweep_takes_the_chunks_with_it(db, collection_id):
+async def test_the_startup_sweep_takes_the_chunks_with_it(db, index, collection_id):
     # A process that died between writing chunks and marking the row leaves both.
     # The row is about to be told it holds none, so the chunks have to go.
-    doc_id = await _add(db, collection_id, "## A\n\nbody")
-    docs = DocumentStore(db)
+    doc_id = await _add(db, index, collection_id, "## A\n\nbody")
+    docs = DocumentStore(db, index)
     await docs.replace_chunks(
         doc_id,
         collection_id,
@@ -223,32 +229,32 @@ async def test_the_startup_sweep_takes_the_chunks_with_it(db, collection_id):
 # --- 4. the provider's words stay out of the tenant's row -------------------
 
 
-async def test_the_embedding_host_never_reaches_the_document_row(db, collection_id):
-    doc_id = await _add(db, collection_id, "## A\n\nbody")
-    await index_document(db, doc_id, embed=_failing_embedder())
-    error = (await DocumentStore(db).get(doc_id))["error"]
+async def test_the_embedding_host_never_reaches_the_document_row(db, index, collection_id):
+    doc_id = await _add(db, index, collection_id, "## A\n\nbody")
+    await index_document(db, index, doc_id, embed=_failing_embedder())
+    error = (await DocumentStore(db, index).get(doc_id))["error"]
     assert "embed.internal" not in error
     assert "401" not in error
     assert error == "the embedding provider could not be reached or refused the request"
 
 
-async def test_an_unexpected_failure_is_not_quoted_to_the_tenant(db, collection_id):
+async def test_an_unexpected_failure_is_not_quoted_to_the_tenant(db, index, collection_id):
     async def exploding(texts):
         raise RuntimeError("connection to postgresql://kb:hunter2@db.internal/kbase lost")
 
-    doc_id = await _add(db, collection_id, "## A\n\nbody")
-    await index_document(db, doc_id, embed=exploding)
-    error = (await DocumentStore(db).get(doc_id))["error"]
+    doc_id = await _add(db, index, collection_id, "## A\n\nbody")
+    await index_document(db, index, doc_id, embed=exploding)
+    error = (await DocumentStore(db, index).get(doc_id))["error"]
     assert "hunter2" not in error
     assert "db.internal" not in error
 
 
-async def test_a_failure_about_the_callers_own_file_is_still_reported(db, collection_id):
+async def test_a_failure_about_the_callers_own_file_is_still_reported(db, index, collection_id):
     # The other half of the rule: an ExtractError describes what the caller sent,
     # so hiding it would leave them with nothing to act on.
-    doc_id = await _add(db, collection_id, "irrelevant", filename="manual.pdf")
-    await index_document(db, doc_id, embed=keyword_embedder())
-    error = (await DocumentStore(db).get(doc_id))["error"]
+    doc_id = await _add(db, index, collection_id, "irrelevant", filename="manual.pdf")
+    await index_document(db, index, doc_id, embed=keyword_embedder())
+    error = (await DocumentStore(db, index).get(doc_id))["error"]
     assert "pdf" in error.lower()
 
 
@@ -406,12 +412,12 @@ def test_an_overlong_filename_is_truncated_to_its_column(client, acme):
 # --- 2. one search does not cost the whole collection ------------------------
 
 
-async def test_a_search_holds_one_partition_not_the_collection(db, collection_id):
+async def test_a_search_holds_one_partition_not_the_collection(db, index, collection_id):
     import tracemalloc
 
     dim = 512
-    docs = DocumentStore(db)
-    doc_id = await _add(db, collection_id, "## A\n\nbody")
+    docs = DocumentStore(db, index)
+    doc_id = await _add(db, index, collection_id, "## A\n\nbody")
     await docs.replace_chunks(
         doc_id,
         collection_id,
@@ -426,7 +432,8 @@ async def test_a_search_holds_one_partition_not_the_collection(db, collection_id
         return [[0.01] * dim for _ in texts], len(texts)
 
     tracemalloc.start()
-    hits, _ = await search_collection(db, collection_id, "q", embed=embed, limit=5)
+    vectors, _tokens = await embed(["q"])
+    hits = await index.query(collection_id, vectors[0], limit=5, min_score=0.35)
     _current, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
 
@@ -437,10 +444,10 @@ async def test_a_search_holds_one_partition_not_the_collection(db, collection_id
     assert peak < one_partition * 12
 
 
-async def test_a_chunk_from_a_replaced_model_is_never_a_hit(db, collection_id):
+async def test_a_chunk_from_a_replaced_model_is_never_a_hit(db, index, collection_id):
     # Even at min_score=0.0, where a zero score would otherwise be admitted.
-    docs = DocumentStore(db)
-    doc_id = await _add(db, collection_id, "## A\n\nbody")
+    docs = DocumentStore(db, index)
+    doc_id = await _add(db, index, collection_id, "## A\n\nbody")
     await docs.replace_chunks(
         doc_id,
         collection_id,
@@ -454,5 +461,6 @@ async def test_a_chunk_from_a_replaced_model_is_never_a_hit(db, collection_id):
     async def embed(texts):
         return [[1.0, 0.0]], 1
 
-    hits, _ = await search_collection(db, collection_id, "q", embed=embed, limit=5, min_score=0.0)
+    vectors, _tokens = await embed(["q"])
+    hits = await index.query(collection_id, vectors[0], limit=5, min_score=0.0)
     assert [h["text"] for h in hits] == ["current"]

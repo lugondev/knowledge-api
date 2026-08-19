@@ -16,6 +16,7 @@ from kbase.db import Database
 from kbase.embedding import Embedder
 from kbase.errors import EmbeddingError, KbError
 from kbase.extract import extract_text
+from kbase.index import ChunkIndex
 from kbase.store import DocumentStore
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,7 @@ def _tenant_reason(exc: BaseException) -> str:
 
 async def index_document(
     db: Database,
+    index: ChunkIndex,
     document_id: str,
     *,
     embed: Embedder,
@@ -44,7 +46,7 @@ async def index_document(
     overlap: int = 100,
 ) -> None:
     """Index one document. Never raises: a failure is recorded on the row."""
-    docs = DocumentStore(db)
+    docs = DocumentStore(db, index)
     doc = await docs.get(document_id)
     if doc is None:
         logger.warning("index requested for unknown document %s", document_id)

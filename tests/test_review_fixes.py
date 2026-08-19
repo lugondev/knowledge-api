@@ -11,6 +11,7 @@ from sqlalchemy import inspect, select
 
 from kbase.db import Database
 from kbase.embedding import make_embedder
+from kbase.index import SqlScanIndex
 from kbase.models import Document
 from kbase.server.app import create_app
 from kbase.settings import Settings
@@ -60,10 +61,10 @@ async def db(tmp_path):
 
 
 async def _seed_doc(db, blob: bytes) -> tuple[str, str]:
-    cols = CollectionStore(db)
+    cols = CollectionStore(db, SqlScanIndex(db))
     await cols.create("acme", "faq")
     cid = await cols.resolve_id("acme", "faq")
-    doc, _ = await DocumentStore(db).create(
+    doc, _ = await DocumentStore(db, SqlScanIndex(db)).create(
         cid,
         title="t",
         filename="a.md",
@@ -86,13 +87,13 @@ async def test_listing_documents_does_not_load_their_bytes(db):
 
 async def test_raw_bytes_still_returns_the_file(db):
     _cid, doc_id = await _seed_doc(db, b"y" * 1000)
-    assert await DocumentStore(db).raw_bytes(doc_id) == b"y" * 1000
+    assert await DocumentStore(db, SqlScanIndex(db)).raw_bytes(doc_id) == b"y" * 1000
 
 
 async def test_owner_collection_id_still_resolves(db):
     cid, doc_id = await _seed_doc(db, b"y" * 1000)
-    assert await DocumentStore(db).owner_collection_id(cid) is None
-    assert await DocumentStore(db).owner_collection_id(doc_id) == cid
+    assert await DocumentStore(db, SqlScanIndex(db)).owner_collection_id(cid) is None
+    assert await DocumentStore(db, SqlScanIndex(db)).owner_collection_id(doc_id) == cid
 
 
 # --- one HTTP client for the process, not one per call -----------------------
@@ -144,7 +145,7 @@ async def test_startup_fails_documents_left_pending_by_a_restart(tmp_path):
     db = Database(url)
     await db.create_all()
     _cid, doc_id = await _seed_doc(db, b"## A\n\nbody")
-    assert (await DocumentStore(db).get(doc_id))["status"] == "pending"
+    assert (await DocumentStore(db, SqlScanIndex(db)).get(doc_id))["status"] == "pending"
     await db.dispose()
 
     s = Settings.from_env(
@@ -166,7 +167,7 @@ async def test_startup_fails_documents_left_pending_by_a_restart(tmp_path):
 
 
 async def test_concurrent_identical_collection_creates_do_not_raise(db):
-    store = CollectionStore(db)
+    store = CollectionStore(db, SqlScanIndex(db))
     results = await asyncio.gather(
         *(store.create("acme", "faq") for _ in range(4)), return_exceptions=True
     )
@@ -175,10 +176,10 @@ async def test_concurrent_identical_collection_creates_do_not_raise(db):
 
 
 async def test_concurrent_identical_document_uploads_do_not_raise(db):
-    cols = CollectionStore(db)
+    cols = CollectionStore(db, SqlScanIndex(db))
     await cols.create("acme", "faq")
     cid = await cols.resolve_id("acme", "faq")
-    docs = DocumentStore(db)
+    docs = DocumentStore(db, SqlScanIndex(db))
     blob = b"## A\n\nbody"
     digest = hashlib.sha256(blob).hexdigest()
     results = await asyncio.gather(

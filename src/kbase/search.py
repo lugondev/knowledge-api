@@ -22,16 +22,10 @@ time. Off the loop it is 0.08 s.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import math
 
 import numpy as np
-from sqlalchemy import select
-
-from kbase.db import Database
-from kbase.embedding import Embedder
-from kbase.models import Chunk, Document
 
 logger = logging.getLogger(__name__)
 
@@ -97,62 +91,9 @@ def _score_batch(
     return [(float(scores[i]), usable[i][1]) for i in keep]
 
 
-async def search_collection(
-    db: Database,
-    collection_id: str,
-    query: str,
-    *,
-    embed: Embedder,
-    limit: int = 5,
-    min_score: float = 0.35,
-) -> tuple[list[dict], int]:
-    if not query.strip():
-        return [], 0
-    vectors, tokens = await embed([query])
-    if not vectors:
-        return [], tokens
-    qvec = np.array(vectors[0], dtype=np.float64)
-    qnorm = float(np.linalg.norm(qvec))
-    if qnorm == 0.0:
-        return [], tokens
-
-    stmt = (
-        select(Chunk, Document)
-        .join(Document, Chunk.document_id == Document.id)
-        # No `status` predicate: a chunk only exists for an indexed document
-        # (see store.mark_pending / indexer's failure path). The join is here
-        # for the title and filename in the payload, not to filter.
-        .where(Chunk.collection_id == collection_id)
-        .execution_options(yield_per=PARTITION_SIZE)
-    )
-
-    best: list[tuple[float, int, dict]] = []
-    scanned = 0
-    async with db.session() as s:
-        result = await s.stream(stmt)
-        async for partition in result.partitions(PARTITION_SIZE):
-            batch = [
-                (
-                    list(chunk.embedding or []),
-                    {
-                        "text": chunk.text,
-                        "document_id": doc.id,
-                        "title": doc.title,
-                        "filename": doc.filename,
-                        "heading": chunk.heading,
-                    },
-                )
-                for chunk, doc in partition
-            ]
-            hits = await asyncio.to_thread(_score_batch, qvec, qnorm, batch, min_score, limit)
-            # The scan position breaks ties, so equal scores come back in the
-            # order they were read and the same query answers the same way twice.
-            best.extend((score, scanned + i, payload) for i, (score, payload) in enumerate(hits))
-            scanned += len(batch)
-            if len(best) > limit:
-                best.sort(key=lambda h: (-h[0], h[1]))
-                del best[limit:]
-
+def warn_if_large(collection_id: str, scanned: int) -> None:
+    """Say it once per collection, then stop. The fix is an index, not a
+    bigger machine."""
     if scanned >= SCAN_WARN_CHUNKS and collection_id not in _warned:
         _warned.add(collection_id)
         logger.warning(
@@ -161,6 +102,3 @@ async def search_collection(
             collection_id,
             scanned,
         )
-
-    best.sort(key=lambda h: (-h[0], h[1]))
-    return [{**payload, "score": score} for score, _order, payload in best[:limit]], tokens

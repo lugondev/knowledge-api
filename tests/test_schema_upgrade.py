@@ -6,6 +6,7 @@ import pytest
 from sqlalchemy import text
 
 from kbase.db import Database
+from kbase.index import SqlScanIndex
 from kbase.store import CollectionStore, DocumentStore
 
 
@@ -17,11 +18,16 @@ async def db(tmp_path):
     await d.dispose()
 
 
-async def test_missing_collection_id_column_is_added_and_backfilled(db):
-    cols = CollectionStore(db)
+@pytest.fixture
+def index(db):
+    return SqlScanIndex(db)
+
+
+async def test_missing_collection_id_column_is_added_and_backfilled(db, index):
+    cols = CollectionStore(db, index)
     await cols.create("acme", "faq")
     cid = await cols.resolve_id("acme", "faq")
-    docs = DocumentStore(db)
+    docs = DocumentStore(db, index)
     doc, _ = await docs.create(
         cid, title="t", filename="f.md", mime="text/markdown", sha256="a" * 64, data=b"x"
     )

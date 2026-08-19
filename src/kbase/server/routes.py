@@ -22,7 +22,6 @@ from pydantic import ValidationError
 from starlette.datastructures import UploadFile
 
 from kbase.indexer import index_document
-from kbase.search import search_collection
 from kbase.server.auth import require_tenant
 from kbase.store import CollectionStore, DocumentStore
 from kbase.types import (
@@ -42,7 +41,8 @@ router = APIRouter()
 
 def _stores(request: Request) -> tuple[CollectionStore, DocumentStore]:
     db = request.app.state.db
-    return CollectionStore(db), DocumentStore(db)
+    index = request.app.state.index
+    return CollectionStore(db, index), DocumentStore(db, index)
 
 
 def _clean_name(raw: str) -> str:
@@ -181,7 +181,11 @@ async def create_document(
         response.status_code = 200
         return doc
     background.add_task(
-        index_document, request.app.state.db, doc["id"], embed=request.app.state.embedder
+        index_document,
+        request.app.state.db,
+        request.app.state.index,
+        doc["id"],
+        embed=request.app.state.embedder,
     )
     response.status_code = 202
     return doc
@@ -243,7 +247,11 @@ async def reindex_document(
     if doc is None:  # deleted between the ownership check and here
         raise HTTPException(status_code=404, detail="document not found")
     background.add_task(
-        index_document, request.app.state.db, document_id, embed=request.app.state.embedder
+        index_document,
+        request.app.state.db,
+        request.app.state.index,
+        document_id,
+        embed=request.app.state.embedder,
     )
     return doc
 
@@ -263,12 +271,12 @@ async def search(
     body: SearchRequest, request: Request, tenant: str = Depends(require_tenant)
 ) -> dict:
     cid = await _collection_id_or_404(request, tenant, body.collection)
-    hits, tokens = await search_collection(
-        request.app.state.db,
-        cid,
-        body.query,
-        embed=request.app.state.embedder,
-        limit=body.limit,
-        min_score=body.min_score,
+    if not body.query.strip():
+        return {"chunks": [], "usage": {"prompt_tokens": 0}}
+    vectors, tokens = await request.app.state.embedder([body.query])
+    if not vectors:
+        return {"chunks": [], "usage": {"prompt_tokens": tokens}}
+    hits = await request.app.state.index.query(
+        cid, vectors[0], limit=body.limit, min_score=body.min_score
     )
     return {"chunks": hits, "usage": {"prompt_tokens": tokens}}

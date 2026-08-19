@@ -10,12 +10,14 @@ from sqlalchemy import update as sa_update
 from sqlalchemy.exc import IntegrityError
 
 from kbase.db import Database
-from kbase.models import Chunk, Collection, Document, utcnow
+from kbase.index import ChunkIndex
+from kbase.models import Collection, Document, utcnow
 
 
 class CollectionStore:
-    def __init__(self, db: Database) -> None:
+    def __init__(self, db: Database, index: ChunkIndex) -> None:
         self._db = db
+        self._index = index
 
     async def create(self, tenant: str, name: str) -> dict:
         """Idempotent: creating an existing collection returns it untouched."""
@@ -78,7 +80,7 @@ class CollectionStore:
             # fail to delete, and the limit is low enough on older SQLite to
             # reach with an ordinary corpus.
             owned = select(Document.id).where(Document.collection_id == row.id)
-            await s.execute(sa_delete(Chunk).where(Chunk.document_id.in_(owned)))
+            await self._index.drop_where_document_in(s, owned)
             await s.execute(sa_delete(Document).where(Document.collection_id == row.id))
             await s.delete(row)
             await s.commit()
@@ -161,8 +163,9 @@ def _doc_dict(d: Document) -> dict:
 
 
 class DocumentStore:
-    def __init__(self, db: Database) -> None:
+    def __init__(self, db: Database, index: ChunkIndex) -> None:
         self._db = db
+        self._index = index
 
     async def create(
         self,
@@ -224,14 +227,13 @@ class DocumentStore:
                 return await self._retry_if_failed(s, existing)
             return _doc_dict(row), True
 
-    @staticmethod
-    async def _retry_if_failed(s, existing: Document) -> tuple[dict, bool]:
+    async def _retry_if_failed(self, s, existing: Document) -> tuple[dict, bool]:
         if existing.status != "failed":
             return _doc_dict(existing), False
         # A failed row can carry chunks from whatever left it failed -- this
         # resets the row for another pass, and the chunks have to go with it,
         # not stay behind for a caller elsewhere to remember to drop.
-        await s.execute(sa_delete(Chunk).where(Chunk.document_id == existing.id))
+        await self._index.drop_document(s, existing.id)
         _reset(existing)
         await s.commit()
         return _doc_dict(existing), True
@@ -253,7 +255,7 @@ class DocumentStore:
             # complete, searchable copy of a document that is about to be
             # re-embedded -- invisible today only because search filters on a
             # joined `status`, which the pgvector backend cannot afford to do.
-            await s.execute(sa_delete(Chunk).where(Chunk.document_id == document_id))
+            await self._index.drop_document(s, document_id)
             _reset(row)
             await s.commit()
             return _doc_dict(row)
@@ -295,38 +297,14 @@ class DocumentStore:
             row = await s.get(Document, document_id)
             if row is None:
                 return False
-            await s.execute(sa_delete(Chunk).where(Chunk.document_id == document_id))
+            await self._index.drop_document(s, document_id)
             await s.delete(row)
             await s.commit()
             return True
 
-    async def chunks(self, document_id: str) -> list[dict]:
-        async with self._db.session() as s:
-            rows = (
-                (
-                    await s.execute(
-                        select(Chunk)
-                        .where(Chunk.document_id == document_id)
-                        .order_by(Chunk.ordinal)
-                    )
-                )
-                .scalars()
-                .all()
-            )
-            return [
-                {
-                    "id": c.id,
-                    "ordinal": c.ordinal,
-                    "text": c.text,
-                    "heading": c.heading,
-                    "embedding": list(c.embedding or []),
-                }
-                for c in rows
-            ]
-
     async def drop_chunks(self, document_id: str) -> None:
         async with self._db.session() as s:
-            await s.execute(sa_delete(Chunk).where(Chunk.document_id == document_id))
+            await self._index.drop_document(s, document_id)
             await s.commit()
 
     async def replace_chunks(
@@ -350,19 +328,7 @@ class DocumentStore:
             ).scalar_one_or_none()
             if still_there is None:
                 return False
-            await s.execute(sa_delete(Chunk).where(Chunk.document_id == document_id))
-            for r in rows:
-                s.add(
-                    Chunk(
-                        document_id=document_id,
-                        collection_id=collection_id,
-                        ordinal=r["ordinal"],
-                        text=r["text"],
-                        heading=r["heading"],
-                        char_count=len(r["text"]),
-                        embedding=r["embedding"],
-                    )
-                )
+            await self._index.replace(s, document_id, collection_id, rows)
             await s.commit()
             return True
 
@@ -386,19 +352,7 @@ class DocumentStore:
             row = await s.get(Document, document_id)
             if row is None:
                 return False
-            await s.execute(sa_delete(Chunk).where(Chunk.document_id == document_id))
-            for r in rows:
-                s.add(
-                    Chunk(
-                        document_id=document_id,
-                        collection_id=collection_id,
-                        ordinal=r["ordinal"],
-                        text=r["text"],
-                        heading=r["heading"],
-                        char_count=len(r["text"]),
-                        embedding=r["embedding"],
-                    )
-                )
+            await self._index.replace(s, document_id, collection_id, rows)
             row.status = "indexed"
             row.error = ""
             row.chunk_count = len(rows)
@@ -431,7 +385,7 @@ class DocumentStore:
         """
         async with self._db.session() as s:
             stranded = select(Document.id).where(Document.status == "pending")
-            await s.execute(sa_delete(Chunk).where(Chunk.document_id.in_(stranded)))
+            await self._index.drop_where_document_in(s, stranded)
             result = await s.execute(
                 sa_update(Document)
                 .where(Document.status == "pending")
@@ -448,7 +402,7 @@ class DocumentStore:
             # `failed` and having chunks would mean a document that couldn't
             # be indexed still answers searches -- self-enforced here rather
             # than left to every caller to have dropped them first.
-            await s.execute(sa_delete(Chunk).where(Chunk.document_id == document_id))
+            await self._index.drop_document(s, document_id)
             row.status = "failed"
             row.error = reason[:2000]
             row.chunk_count = 0
