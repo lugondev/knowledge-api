@@ -69,7 +69,7 @@ async def index_document(
         if collection_id is None:
             logger.info("document %s was deleted while it was being indexed", document_id)
             return
-        written = await docs.replace_chunks(
+        written = await docs.finish_indexing(
             document_id,
             collection_id,
             [
@@ -87,7 +87,6 @@ async def index_document(
             # chunks were refused rather than written, so nothing is orphaned.
             logger.info("document %s was deleted while it was being indexed", document_id)
             return
-        await docs.mark_indexed(document_id, len(pieces))
     except Exception as exc:  # noqa: BLE001 - the failure belongs on the row
         logger.warning("indexing document %s failed: %s", document_id, exc, exc_info=True)
         await docs.drop_chunks(document_id)

@@ -228,6 +228,10 @@ class DocumentStore:
     async def _retry_if_failed(s, existing: Document) -> tuple[dict, bool]:
         if existing.status != "failed":
             return _doc_dict(existing), False
+        # A failed row can carry chunks from whatever left it failed -- this
+        # resets the row for another pass, and the chunks have to go with it,
+        # not stay behind for a caller elsewhere to remember to drop.
+        await s.execute(sa_delete(Chunk).where(Chunk.document_id == existing.id))
         _reset(existing)
         await s.commit()
         return _doc_dict(existing), True
@@ -362,6 +366,46 @@ class DocumentStore:
             await s.commit()
             return True
 
+    async def finish_indexing(
+        self, document_id: str, collection_id: str, rows: list[dict]
+    ) -> bool:
+        """`replace_chunks` and `mark_indexed`, fused into one commit.
+
+        Done as two separate transactions, there is a real window between them
+        where the chunks exist and are searchable by `collection_id` alone but
+        the row still reads `pending` -- a concurrent search would either miss
+        them (joined-status filter) or wrongly surface a document mid-reindex
+        (chunk-only filter, which is what the pgvector backend requires). One
+        commit means an external reader never observes the row and its chunks
+        disagreeing about whether this document is indexed.
+
+        Returns False when the document was deleted while it was being
+        indexed, exactly like `replace_chunks` -- nothing is written.
+        """
+        async with self._db.session() as s:
+            row = await s.get(Document, document_id)
+            if row is None:
+                return False
+            await s.execute(sa_delete(Chunk).where(Chunk.document_id == document_id))
+            for r in rows:
+                s.add(
+                    Chunk(
+                        document_id=document_id,
+                        collection_id=collection_id,
+                        ordinal=r["ordinal"],
+                        text=r["text"],
+                        heading=r["heading"],
+                        char_count=len(r["text"]),
+                        embedding=r["embedding"],
+                    )
+                )
+            row.status = "indexed"
+            row.error = ""
+            row.chunk_count = len(rows)
+            row.indexed_at = utcnow()
+            await s.commit()
+            return True
+
     async def mark_indexed(self, document_id: str, chunk_count: int) -> None:
         async with self._db.session() as s:
             row = await s.get(Document, document_id)
@@ -401,6 +445,10 @@ class DocumentStore:
             row = await s.get(Document, document_id)
             if row is None:
                 return
+            # `failed` and having chunks would mean a document that couldn't
+            # be indexed still answers searches -- self-enforced here rather
+            # than left to every caller to have dropped them first.
+            await s.execute(sa_delete(Chunk).where(Chunk.document_id == document_id))
             row.status = "failed"
             row.error = reason[:2000]
             row.chunk_count = 0
