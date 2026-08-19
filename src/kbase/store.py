@@ -245,6 +245,11 @@ class DocumentStore:
                 return None
             if row.status == "pending":
                 return _doc_dict(row)
+            # The chunks go with the status. Left behind, they would be a
+            # complete, searchable copy of a document that is about to be
+            # re-embedded -- invisible today only because search filters on a
+            # joined `status`, which the pgvector backend cannot afford to do.
+            await s.execute(sa_delete(Chunk).where(Chunk.document_id == document_id))
             _reset(row)
             await s.commit()
             return _doc_dict(row)

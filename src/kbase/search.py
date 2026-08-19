@@ -119,7 +119,10 @@ async def search_collection(
     stmt = (
         select(Chunk, Document)
         .join(Document, Chunk.document_id == Document.id)
-        .where(Document.collection_id == collection_id, Document.status == "indexed")
+        # No `status` predicate: a chunk only exists for an indexed document
+        # (see store.mark_pending / indexer's failure path). The join is here
+        # for the title and filename in the payload, not to filter.
+        .where(Chunk.collection_id == collection_id)
         .execution_options(yield_per=PARTITION_SIZE)
     )
 
