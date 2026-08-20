@@ -151,3 +151,17 @@ class SqlScanIndex:
         warn_if_large(collection_id, scanned)
         best.sort(key=lambda h: (-h[0], h[1]))
         return [{**payload, "score": score} for score, _order, payload in best[:limit]]
+
+
+def choose_index(db: Database, settings) -> ChunkIndex:
+    """Postgres plus a dimension means pgvector; anything else scans.
+
+    Making the dimension the switch is what keeps this upgrade non-breaking: a
+    Postgres deployment that does not set it keeps the behaviour it has, and
+    `kb doctor` is what tells the operator they are still scanning.
+    """
+    if settings.database_url.startswith("postgresql") and settings.embed_dim > 0:
+        from kbase.pgindex import PgVectorIndex
+
+        return PgVectorIndex(db, dim=settings.embed_dim)
+    return SqlScanIndex(db)

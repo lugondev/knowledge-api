@@ -9,7 +9,7 @@ from fastapi import FastAPI
 
 from kbase.db import Database
 from kbase.embedding import Embedder, make_embedder
-from kbase.index import SqlScanIndex
+from kbase.index import choose_index
 from kbase.server.limits import MaxBodySize
 from kbase.server.routes import router
 from kbase.settings import Settings
@@ -24,7 +24,7 @@ def create_app(settings: Settings, *, embedder: Embedder | None = None) -> FastA
         db = Database(settings.database_url)
         await db.create_all()
         app.state.db = db
-        index = SqlScanIndex(db)
+        index = choose_index(db, settings)
         await index.create_schema()
         app.state.index = index
         # Indexing runs in a background task, so a restart mid-index leaves a

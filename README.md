@@ -67,12 +67,20 @@ describing the file they sent is quoted; anything describing this deployment —
 the embedding host, a driver's connection string — is not, and stays in the
 service log.
 
-Search scores every chunk in the collection, in a worker thread, a partition at
-a time: a search costs about 16 MB whether the collection holds a thousand
-chunks or a hundred thousand. It is still a linear scan, so it gets slower as the
-corpus grows — around 1.2 s over 10,000 chunks. Past 50,000 the log says so once
-per collection, and the answer at that point is a vector index rather than a
-larger machine.
+Search has two backends. On SQLite — and on Postgres with no `KB_EMBED_DIM` —
+it scores every chunk in the collection, in a worker thread, a partition at
+a time: a search costs about 16 MB whether the collection holds a thousand chunks
+or a hundred thousand. It is a linear scan, so it slows as the corpus grows,
+around 1.2 s over 10,000 chunks.
+
+Set `KB_EMBED_DIM` on Postgres and chunks are stored in a pgvector column with
+an HNSW index, and the ordering happens in the database. Vectors already indexed
+are copied across on the next start — no re-embedding, no provider spend — and
+any chunk whose width does not match marks its document `failed` with a reason,
+recoverable with `POST /v1/documents/{id}/reindex`. HNSW does not go above 2000
+dimensions; wider than that stores fine and searches by scanning, and `kb
+doctor` says so. Results from the two backends are not identical: HNSW is
+approximate, which is the ordinary price of a vector index.
 
 ## Configuration
 
@@ -80,6 +88,7 @@ larger machine.
 | --- | --- |
 | `KB_API_KEYS` | `key:tenant,key:tenant`. Unset means every request is a 401 |
 | `KB_DATABASE_URL` | SQLite by default; a Postgres URL switches the store |
+| `KB_EMBED_DIM` | Postgres only. Setting it stores vectors in a pgvector column with an HNSW index; unset means the linear scan. Must match the model's width |
 | `KB_EMBED_BASE_URL` | OpenAI-compatible `/embeddings` endpoint |
 | `KB_EMBED_API_KEY` | credential for the above |
 | `KB_EMBED_MODEL` | embedding model id |
