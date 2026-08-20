@@ -11,6 +11,7 @@ of `Chunk` to this file will fail at runtime, not at import.
 from __future__ import annotations
 
 import logging
+import math
 
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import text
@@ -158,4 +159,52 @@ class PgVectorIndex:
     async def query(
         self, collection_id: str, qvec: list[float], *, limit: int, min_score: float
     ) -> list[dict]:
-        raise NotImplementedError  # Task 6
+        """Order in the database, floor in Python.
+
+        Filtering after ordering is equivalent to the scan's floor-then-top-k,
+        because the floor is monotonic in distance -- and a `WHERE` on the
+        computed score would push the ANN index out of the plan.
+
+        The document join is a second query rather than part of the first: a
+        join in the ordered statement gives the planner a reason not to use the
+        HNSW index, and this one fetches at most `limit` rows.
+        """
+        if not any(qvec):
+            return []
+        async with self._db.session() as s:
+            rows = (
+                await s.execute(
+                    text(
+                        "SELECT document_id, text, heading, "
+                        "1 - (embedding <=> CAST(:q AS vector)) AS score "
+                        "FROM chunks WHERE collection_id = :cid "
+                        "ORDER BY embedding <=> CAST(:q AS vector) LIMIT :lim"
+                    ),
+                    {"q": _literal(qvec), "cid": collection_id, "lim": limit},
+                )
+            ).mappings().all()
+
+            kept = [r for r in rows if not math.isnan(r["score"]) and r["score"] >= min_score]
+            if not kept:
+                return []
+
+            docs = (
+                await s.execute(
+                    text("SELECT id, title, filename FROM documents WHERE id = ANY(:ids)"),
+                    {"ids": list({r["document_id"] for r in kept})},
+                )
+            ).mappings().all()
+        meta = {d["id"]: d for d in docs}
+
+        return [
+            {
+                "text": r["text"],
+                "document_id": r["document_id"],
+                "title": meta[r["document_id"]]["title"],
+                "filename": meta[r["document_id"]]["filename"],
+                "heading": r["heading"],
+                "score": float(r["score"]),
+            }
+            for r in kept
+            if r["document_id"] in meta
+        ]

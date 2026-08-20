@@ -128,3 +128,89 @@ async def test_a_different_dimension_refuses_to_migrate(db, index):
         await PgVectorIndex(db, dim=DIM + 1).create_schema()
 
     assert str(DIM) in str(caught.value)
+
+
+async def _seeded(db, index, rows, tenant="acme", name="faq", sha="d" * 64):
+    cols = CollectionStore(db, index)
+    await cols.create(tenant, name)
+    cid = await cols.resolve_id(tenant, name)
+    docs, doc_id = await _document(db, index, cid, sha)
+    await docs.replace_chunks(doc_id, cid, rows)
+    await docs.mark_indexed(doc_id, len(rows))
+    return cid
+
+
+async def test_query_returns_the_nearer_chunk_first(db, index):
+    cid = await _seeded(
+        db,
+        index,
+        [
+            {"ordinal": 0, "text": "far", "heading": "", "embedding": [0.0, 1.0, 0.0]},
+            {"ordinal": 1, "text": "near", "heading": "", "embedding": [1.0, 0.0, 0.0]},
+        ],
+    )
+
+    hits = await index.query(cid, [1.0, 0.0, 0.0], limit=5, min_score=0.0)
+
+    assert [h["text"] for h in hits] == ["near", "far"]
+    assert hits[0]["title"] == "T"
+    assert hits[0]["score"] == pytest.approx(1.0)
+
+
+async def test_min_score_is_a_floor(db, index):
+    cid = await _seeded(
+        db,
+        index,
+        [
+            {"ordinal": 0, "text": "orthogonal", "heading": "", "embedding": [0.0, 1.0, 0.0]},
+            {"ordinal": 1, "text": "same", "heading": "", "embedding": [1.0, 0.0, 0.0]},
+        ],
+    )
+
+    hits = await index.query(cid, [1.0, 0.0, 0.0], limit=5, min_score=0.5)
+
+    assert [h["text"] for h in hits] == ["same"]
+
+
+async def test_query_never_crosses_collections(db, index):
+    await _seeded(
+        db,
+        index,
+        [{"ordinal": 0, "text": "secret", "heading": "", "embedding": [1.0, 0.0, 0.0]}],
+        tenant="globex",
+        name="theirs",
+        sha="e" * 64,
+    )
+    cols = CollectionStore(db, index)
+    await cols.create("acme", "mine")
+    mine = await cols.resolve_id("acme", "mine")
+
+    assert await index.query(mine, [1.0, 0.0, 0.0], limit=5, min_score=0.0) == []
+
+
+async def test_a_zero_vector_scores_nothing_rather_than_NaN(db, index):
+    cid = await _seeded(
+        db,
+        index,
+        [{"ordinal": 0, "text": "empty", "heading": "", "embedding": [0.0, 0.0, 0.0]}],
+        sha="f" * 64,
+    )
+
+    # The scan path returns 0.0 for an uncomparable vector; `<=>` returns NaN,
+    # and NaN passes a `>= min_score` test in some comparisons. Neither
+    # backend may admit it as a hit.
+    assert await index.query(cid, [1.0, 0.0, 0.0], limit=5, min_score=0.0) == []
+
+
+async def test_limit_caps_the_result(db, index):
+    cid = await _seeded(
+        db,
+        index,
+        [
+            {"ordinal": i, "text": f"c{i}", "heading": "", "embedding": [1.0, 0.0, 0.0]}
+            for i in range(5)
+        ],
+        sha="0" * 64,
+    )
+
+    assert len(await index.query(cid, [1.0, 0.0, 0.0], limit=2, min_score=0.0)) == 2
