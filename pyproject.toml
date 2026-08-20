@@ -23,7 +23,7 @@ dependencies = [
 kb = "kbase.cli:main"
 
 [project.optional-dependencies]
-postgres = ["asyncpg>=0.29"]
+postgres = ["asyncpg>=0.29", "pgvector>=0.3"]
 dev = ["pytest>=8.3", "pytest-asyncio>=0.23", "ruff>=0.6"]
 
 [tool.setuptools.packages.find]

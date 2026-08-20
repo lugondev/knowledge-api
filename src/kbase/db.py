@@ -17,6 +17,12 @@ class Database:
         self._engine = create_async_engine(url, future=True)
         self._sessionmaker = async_sessionmaker(self._engine, expire_on_commit=False)
 
+    @property
+    def engine(self):
+        """For DDL that SQLAlchemy's metadata cannot express -- the vector
+        extension, the typed column, the HNSW index."""
+        return self._engine
+
     async def create_all(self) -> None:
         async with self._engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)

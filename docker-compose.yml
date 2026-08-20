@@ -7,5 +7,18 @@ services:
     volumes:
       - kbase-data:/data
 
+  postgres:
+    profiles: ["pg"]
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_PASSWORD: kbase
+      POSTGRES_USER: kbase
+      POSTGRES_DB: kbase
+    ports:
+      - "5433:5432"
+    volumes:
+      - kbase-pg:/var/lib/postgresql/data
+
 volumes:
   kbase-data:
+  kbase-pg:

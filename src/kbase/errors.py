@@ -32,3 +32,10 @@ class ExtractError(KbError):
 
     Its message describes the file the caller sent, so it is reported verbatim.
     """
+
+
+class SchemaError(KbError):
+    """The database's shape and the configuration disagree.
+
+    Never a tenant's problem, so its message is for the log and the operator.
+    """
