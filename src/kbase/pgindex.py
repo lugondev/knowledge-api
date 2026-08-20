@@ -77,9 +77,29 @@ class PgVectorIndex:
                     f"ALTER TABLE chunks ADD COLUMN IF NOT EXISTS embedding_vec vector({self._dim})"
                 )
             )
-            # Task 7 adds the backfill and the mismatch handling here. Until
-            # then this path is correct only for a database with no chunks in
-            # it, which is what this task's tests cover.
+            # Copy what is already paid for. No provider call, no spend.
+            await conn.execute(
+                text(
+                    "UPDATE chunks SET embedding_vec = embedding::text::vector "
+                    "WHERE embedding_vec IS NULL AND json_array_length(embedding) = :n"
+                ),
+                {"n": self._dim},
+            )
+            # What is left was embedded by a different model. Its document is
+            # told so in words its tenant can act on, and the bytes are still
+            # stored, so `POST /v1/documents/{id}/reindex` is the whole fix.
+            await conn.execute(
+                text(
+                    "UPDATE documents SET status = 'failed', chunk_count = 0, "
+                    "indexed_at = NULL, error = :reason WHERE id IN "
+                    "(SELECT DISTINCT document_id FROM chunks WHERE embedding_vec IS NULL)"
+                ),
+                {
+                    "reason": "indexed with a different embedding model than the one now "
+                    "configured; reindex this document"
+                },
+            )
+            await conn.execute(text("DELETE FROM chunks WHERE embedding_vec IS NULL"))
             await conn.execute(text("ALTER TABLE chunks DROP COLUMN embedding"))
             await conn.execute(text("ALTER TABLE chunks RENAME COLUMN embedding_vec TO embedding"))
             await self._build_index(conn)

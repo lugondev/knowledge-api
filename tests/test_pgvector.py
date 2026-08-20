@@ -214,3 +214,67 @@ async def test_limit_caps_the_result(db, index):
     )
 
     assert len(await index.query(cid, [1.0, 0.0, 0.0], limit=2, min_score=0.0)) == 2
+
+
+async def test_existing_json_vectors_are_backfilled_without_re_embedding(db):
+    """The JSON column holds vectors someone already paid for."""
+    cols_index = PgVectorIndex(db, dim=DIM)  # not yet migrated
+    cols = CollectionStore(db, cols_index)
+    await cols.create("acme", "faq")
+    cid = await cols.resolve_id("acme", "faq")
+    async with db.session() as s:
+        await s.execute(
+            text(
+                "INSERT INTO documents (id, collection_id, title, filename, mime, sha256, "
+                "bytes_len, data, status, error, chunk_count, created_at) VALUES "
+                "('d1', :cid, 'T', 'f.md', 'text/markdown', :sha, 1, '\\x78'::bytea, "
+                "'indexed', '', 1, now())"
+            ),
+            {"cid": cid, "sha": "a" * 64},
+        )
+        await s.execute(
+            text(
+                "INSERT INTO chunks (id, document_id, collection_id, ordinal, text, heading, "
+                "char_count, embedding) VALUES ('c1', 'd1', :cid, 0, 'hi', '', 2, "
+                "'[1.0, 0.0, 0.0]'::json)"
+            ),
+            {"cid": cid},
+        )
+        await s.commit()
+
+    await cols_index.create_schema()
+
+    assert [r["embedding"] for r in await cols_index.chunks("d1")] == [[1.0, 0.0, 0.0]]
+
+
+async def test_a_chunk_of_the_wrong_width_fails_its_document_instead_of_the_boot(db):
+    index = PgVectorIndex(db, dim=DIM)
+    cols = CollectionStore(db, index)
+    await cols.create("acme", "faq")
+    cid = await cols.resolve_id("acme", "faq")
+    async with db.session() as s:
+        await s.execute(
+            text(
+                "INSERT INTO documents (id, collection_id, title, filename, mime, sha256, "
+                "bytes_len, data, status, error, chunk_count, created_at) VALUES "
+                "('d2', :cid, 'T', 'f.md', 'text/markdown', :sha, 1, '\\x78'::bytea, "
+                "'indexed', '', 1, now())"
+            ),
+            {"cid": cid, "sha": "b" * 64},
+        )
+        await s.execute(
+            text(
+                "INSERT INTO chunks (id, document_id, collection_id, ordinal, text, heading, "
+                "char_count, embedding) VALUES ('c2', 'd2', :cid, 0, 'hi', '', 2, "
+                "'[1.0, 0.0]'::json)"
+            ),
+            {"cid": cid},
+        )
+        await s.commit()
+
+    await index.create_schema()
+
+    doc = await DocumentStore(db, index).get("d2")
+    assert doc["status"] == "failed"
+    assert "embedding model" in doc["error"]
+    assert await index.chunks("d2") == []
