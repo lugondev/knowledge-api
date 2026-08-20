@@ -278,3 +278,111 @@ async def test_a_chunk_of_the_wrong_width_fails_its_document_instead_of_the_boot
     assert doc["status"] == "failed"
     assert "embedding model" in doc["error"]
     assert await index.chunks("d2") == []
+
+
+async def test_a_wrong_width_query_vector_returns_nothing(db, index):
+    """The scan calls a width mismatch "not comparable" and returns `[]`.
+
+    `<=>` calls it an error, and the route turns that into a 500. Two backends
+    behind one seam cannot disagree about what an ordinary caller mistake is.
+    """
+    cid = await _seeded(
+        db,
+        index,
+        [{"ordinal": 0, "text": "hi", "heading": "", "embedding": [1.0, 0.0, 0.0]}],
+        sha="1" * 64,
+    )
+
+    assert await index.query(cid, [1.0, 0.0], limit=5, min_score=0.0) == []
+    assert await index.query(cid, [1.0, 0.0, 0.0, 1.0], limit=5, min_score=0.0) == []
+
+
+async def test_dropping_the_dimension_refuses_to_start(db, index):
+    """`KB_EMBED_DIM` unset on a migrated database selects the scan backend.
+
+    The scan then reads `vector(3)` through a `JSON` attribute, gets the string
+    '[1,0,0]', turns it into a list of characters, and drops every chunk as a
+    width mismatch: search answers 200 with nothing, for a corpus that is
+    entirely intact. That must be a refusal to start, not a silent emptying.
+    """
+    from kbase.errors import SchemaError
+    from kbase.index import SqlScanIndex
+
+    with pytest.raises(SchemaError) as caught:
+        await SqlScanIndex(db).create_schema()
+
+    assert "KB_EMBED_DIM" in str(caught.value)
+    assert str(DIM) in str(caught.value)
+
+
+async def test_a_null_embedding_reads_back_as_no_vector(db, index):
+    """The migrated column is nullable, so `chunks()` must survive a NULL."""
+    cols = CollectionStore(db, index)
+    await cols.create("acme", "faq")
+    cid = await cols.resolve_id("acme", "faq")
+    docs, doc_id = await _document(db, index, cid, "2" * 64)
+    async with db.session() as s:
+        await s.execute(
+            text(
+                "INSERT INTO chunks (id, document_id, collection_id, ordinal, text, heading, "
+                "char_count, embedding) VALUES ('cnull', :doc, :cid, 0, 'hi', '', 2, NULL)"
+            ),
+            {"doc": doc_id, "cid": cid},
+        )
+        await s.commit()
+
+    rows = await index.chunks(doc_id)
+
+    assert [r["embedding"] for r in rows] == [[]]
+
+
+async def test_a_failed_document_keeps_none_of_its_chunks(db):
+    """One good chunk and one of the wrong width under the same document.
+
+    Deleting only the unconverted chunk leaves the good one searchable under a
+    document that is `failed` with `chunk_count = 0` -- the exact violation of
+    the chunk-exists-only-for-an-indexed-document invariant that the pgvector
+    single-table filter is built on.
+    """
+    index = PgVectorIndex(db, dim=DIM)
+    cols = CollectionStore(db, index)
+    await cols.create("acme", "faq")
+    cid = await cols.resolve_id("acme", "faq")
+    async with db.session() as s:
+        await s.execute(
+            text(
+                "INSERT INTO documents (id, collection_id, title, filename, mime, sha256, "
+                "bytes_len, data, status, error, chunk_count, created_at) VALUES "
+                "('d3', :cid, 'T', 'f.md', 'text/markdown', :sha, 1, '\\x78'::bytea, "
+                "'indexed', '', 2, now())"
+            ),
+            {"cid": cid, "sha": "3" * 64},
+        )
+        await s.execute(
+            text(
+                "INSERT INTO chunks (id, document_id, collection_id, ordinal, text, heading, "
+                "char_count, embedding) VALUES ('c3a', 'd3', :cid, 0, 'good', '', 4, "
+                "'[1.0, 0.0, 0.0]'::json), ('c3b', 'd3', :cid, 1, 'narrow', '', 6, "
+                "'[1.0, 0.0]'::json)"
+            ),
+            {"cid": cid},
+        )
+        await s.commit()
+
+    await index.create_schema()
+
+    doc = await DocumentStore(db, index).get("d3")
+    assert doc["status"] == "failed"
+    assert await index.chunks("d3") == []
+    assert await index.query(cid, [1.0, 0.0, 0.0], limit=5, min_score=0.0) == []
+
+
+async def test_the_scan_backend_still_boots_on_an_unmigrated_postgres(db):
+    """The refusal is about a `vector` column, not about Postgres.
+
+    A Postgres deployment that never set `KB_EMBED_DIM` has a JSON column the
+    scan reads correctly, and must keep starting.
+    """
+    from kbase.index import SqlScanIndex
+
+    await SqlScanIndex(db).create_schema()

@@ -30,6 +30,13 @@ def _literal(vec: list[float]) -> str:
     return "[" + ",".join(repr(float(x)) for x in vec) + "]"
 
 
+def _parse(literal: str | None) -> list[float]:
+    """The same form, read back. NULL means no vector, not a failure."""
+    if not literal:
+        return []
+    return [float(x) for x in literal.strip("[]").split(",") if x]
+
+
 class PgVectorIndex:
     def __init__(self, db: Database, *, dim: int) -> None:
         if dim <= 0:
@@ -99,7 +106,24 @@ class PgVectorIndex:
                     "configured; reindex this document"
                 },
             )
-            await conn.execute(text("DELETE FROM chunks WHERE embedding_vec IS NULL"))
+            # Every chunk of those documents, not only the ones that failed to
+            # convert. A document with one 3-wide and one 2-wide chunk would
+            # otherwise end `failed` with `chunk_count = 0` and its good chunk
+            # still in the table and still returned by `query` -- a searchable
+            # chunk under a non-`indexed` document, which is exactly the
+            # invariant the single-table filter above depends on.
+            #
+            # This runs after the UPDATE, and must: the failed documents are
+            # identified by the presence of their unconverted chunks, so
+            # deleting first would leave nothing to identify them with.
+            await conn.execute(
+                text(
+                    "WITH failed AS (SELECT DISTINCT document_id FROM chunks "
+                    "WHERE embedding_vec IS NULL) "
+                    "DELETE FROM chunks USING failed "
+                    "WHERE chunks.document_id = failed.document_id"
+                )
+            )
             await conn.execute(text("ALTER TABLE chunks DROP COLUMN embedding"))
             await conn.execute(text("ALTER TABLE chunks RENAME COLUMN embedding_vec TO embedding"))
             await self._build_index(conn)
@@ -171,7 +195,10 @@ class PgVectorIndex:
                 "ordinal": r["ordinal"],
                 "text": r["text"],
                 "heading": r["heading"],
-                "embedding": [float(x) for x in r["emb"].strip("[]").split(",") if x],
+                # The converted column is nullable -- `create_schema` adds it
+                # without NOT NULL -- so a NULL is a vector this row does not
+                # have, not a crash.
+                "embedding": _parse(r["emb"]),
             }
             for r in rows
         ]
@@ -189,6 +216,12 @@ class PgVectorIndex:
         join in the ordered statement gives the planner a reason not to use the
         HNSW index, and this one fetches at most `limit` rows.
         """
+        if len(qvec) != self._dim:
+            # `SqlScanIndex` calls a width mismatch "not comparable" and
+            # returns nothing (search.py `_score_batch`); `<=>` calls it a
+            # DataError, which the route renders as a 500. Two backends behind
+            # one seam cannot disagree about what an ordinary caller mistake is.
+            return []
         if not any(qvec):
             return []
         async with self._db.session() as s:
@@ -204,6 +237,10 @@ class PgVectorIndex:
                 )
             ).mappings().all()
 
+            # `math.isnan` can never fire here -- Python's `NaN >= x` is
+            # already False -- and it stays because Postgres's `NaN >= x` is
+            # TRUE. That asymmetry is the whole reason the floor is applied in
+            # Python rather than pushed into the SQL as a WHERE.
             kept = [r for r in rows if not math.isnan(r["score"]) and r["score"] >= min_score]
             if not kept:
                 return []

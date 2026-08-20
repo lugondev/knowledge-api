@@ -86,9 +86,16 @@ class Settings:
         """Things worth saying that are not reasons to refuse to start."""
         notes: list[str] = []
         if self.database_url.startswith("postgresql") and self.embed_dim == 0:
+            # Not "will scan", flatly: if this database was ever started *with*
+            # the variable set, its `chunks.embedding` is a `vector` column the
+            # scanning backend cannot read, and the service refuses to start
+            # (`SqlScanIndex.create_schema`) rather than searching an intact
+            # corpus and finding nothing in it.
             notes.append(
-                "KB_EMBED_DIM is unset on a Postgres database: every search will "
-                "scan the collection rather than use a vector index"
+                "KB_EMBED_DIM is unset on a Postgres database: searches will scan the "
+                "collection rather than use a vector index -- and if this database was "
+                "ever migrated by a previous start with it set, the service will refuse "
+                "to start until it is set again"
             )
         if self.embed_dim > HNSW_MAX_DIMENSIONS:
             notes.append(

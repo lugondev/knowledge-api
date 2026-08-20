@@ -37,3 +37,12 @@ async def test_postgres_with_a_dimension_uses_pgvector(db):
 
     s = _settings(KB_DATABASE_URL="postgresql+asyncpg://u:p@h/db", KB_EMBED_DIM="1536")
     assert isinstance(choose_index(db, s), PgVectorIndex)
+
+
+async def test_the_scan_backend_asks_sqlite_nothing(db):
+    """The migrated-column guard is a Postgres query; SQLite has no such type.
+
+    Boot on SQLite must not run it -- and must not need the `postgres` extra
+    installed to find that out.
+    """
+    await SqlScanIndex(db).create_schema()

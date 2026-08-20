@@ -3,7 +3,10 @@ FROM python:3.12-slim
 WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN pip install --no-cache-dir .
+# `[postgres]` because compose ships a pgvector service and KB_DATABASE_URL is
+# an env var: without the driver in the image, pointing this container at
+# Postgres is a ModuleNotFoundError on the first connection, not a config error.
+RUN pip install --no-cache-dir ".[postgres]"
 
 ENV KB_DATABASE_URL=sqlite+aiosqlite:////data/kbase.db
 VOLUME ["/data"]

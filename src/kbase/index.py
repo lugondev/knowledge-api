@@ -18,10 +18,11 @@ from typing import Protocol
 
 import numpy as np
 from sqlalchemy import delete as sa_delete
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kbase.db import Database
+from kbase.errors import SchemaError
 from kbase.models import Chunk, Document
 from kbase.search import PARTITION_SIZE, _score_batch, warn_if_large
 
@@ -51,7 +52,46 @@ class SqlScanIndex:
         self._db = db
 
     async def create_schema(self) -> None:
-        """Nothing beyond the tables `Database.create_all` already makes."""
+        """Nothing to build -- but a corpus this backend cannot read is fatal.
+
+        A Postgres database whose `chunks.embedding` `PgVectorIndex` already
+        converted to `vector(n)` reads, through the ORM's `JSON` declaration,
+        as the string '[1,0,0]'. `list()` of that is a list of characters,
+        `_score_batch` drops it as a width mismatch, and every search answers
+        200 with nothing over a corpus that is entirely intact -- `/healthz`
+        green, `kb doctor` clean. Unsetting `KB_EMBED_DIM` must therefore be as
+        fatal as setting it wrong (`PgVectorIndex.create_schema` already
+        refuses that direction), which is what this closes.
+
+        The check lives here rather than in `choose_index` because it needs a
+        live query and `choose_index` is synchronous and connectionless -- it
+        is called against URLs with no server behind them. This is the one
+        boot-time hook every deployment awaits before serving
+        (`server/app.py`), so nothing routes around it.
+        """
+        # SQLite has no `vector` type to find and no `pg_attribute` to ask, and
+        # a SQLite deployment must boot without the `postgres` extra installed.
+        if self._db.engine.dialect.name != "postgresql":
+            return None
+        async with self._db.engine.connect() as conn:
+            kind = (
+                await conn.execute(
+                    text(
+                        "SELECT format_type(atttypid, atttypmod) FROM pg_attribute "
+                        "WHERE attrelid = to_regclass('chunks') AND attname = 'embedding' "
+                        "AND NOT attisdropped"
+                    )
+                )
+            ).scalar_one_or_none()
+        if kind and kind.startswith("vector"):
+            width = kind.partition("(")[2].rstrip(")")
+            raise SchemaError(
+                f"chunks.embedding is {kind}, but KB_EMBED_DIM is unset, so this process "
+                "selected the scanning backend -- which cannot read that column and would "
+                "answer every search with nothing. Set KB_EMBED_DIM"
+                + (f"={width}" if width else " to the column's width")
+                + ", or drop the column and reindex."
+            )
         return None
 
     async def replace(

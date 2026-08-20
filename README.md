@@ -7,7 +7,7 @@ something irrelevant.
 ## Run it
 
 ```bash
-pip install -e ".[dev]"
+pip install -e ".[dev,postgres]"   # postgres: the asyncpg driver, and tests/test_pgvector.py
 
 export KB_API_KEYS=pick-a-long-random-string:acme
 export KB_EMBED_BASE_URL=https://api.openai.com/v1
@@ -82,13 +82,23 @@ dimensions; wider than that stores fine and searches by scanning, and `kb
 doctor` says so. Results from the two backends are not identical: HNSW is
 approximate, which is the ordinary price of a vector index.
 
+That conversion is DDL, and it runs at boot: **run one instance per database
+while it happens.** A rolling deploy has an old instance still writing to the
+JSON column while a second new one runs the same `DROP COLUMN` / `RENAME`, which
+fails and crash-loops that replica. Stop the old instance, start one new one,
+then scale back up. (The stale-`pending` sweep in `server/app.py` assumes the
+same thing, for the same reason.) Unsetting `KB_EMBED_DIM` afterwards is refused
+at boot rather than obeyed: the column is a `vector` the scanning backend cannot
+read, and starting anyway would answer every search with nothing over a corpus
+that is entirely intact.
+
 ## Configuration
 
 | | |
 | --- | --- |
 | `KB_API_KEYS` | `key:tenant,key:tenant`. Unset means every request is a 401 |
 | `KB_DATABASE_URL` | SQLite by default; a Postgres URL switches the store |
-| `KB_EMBED_DIM` | Postgres only. Setting it stores vectors in a pgvector column with an HNSW index; unset means the linear scan. Must match the model's width |
+| `KB_EMBED_DIM` | Postgres only. Setting it stores vectors in a pgvector column with an HNSW index; unset means the linear scan. Must match the model's width, and cannot be unset again once a database has been migrated |
 | `KB_EMBED_BASE_URL` | OpenAI-compatible `/embeddings` endpoint |
 | `KB_EMBED_API_KEY` | credential for the above |
 | `KB_EMBED_MODEL` | embedding model id |
