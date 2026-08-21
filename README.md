@@ -102,6 +102,7 @@ that is entirely intact.
 | `KB_EMBED_BASE_URL` | OpenAI-compatible `/embeddings` endpoint |
 | `KB_EMBED_API_KEY` | credential for the above |
 | `KB_EMBED_MODEL` | embedding model id |
+| `KB_EMBED_BATCH` | Inputs per `/embeddings` request (default 32). Providers disagree: DashScope's `text-embedding-v3` rejects more than 10 |
 | `KB_MAX_UPLOAD_BYTES` | rejected above this (default 20 MB) |
 | `KB_DOCS` | `false` closes `/docs` and `/redoc`, which need no credential |
 

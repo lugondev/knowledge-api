@@ -64,6 +64,7 @@ def create_app(settings: Settings, *, embedder: Embedder | None = None) -> FastA
         base_url=settings.embed_base_url,
         api_key=settings.embed_api_key,
         model=settings.embed_model,
+        batch_size=settings.embed_batch,
     )
     app.include_router(router)
     return app

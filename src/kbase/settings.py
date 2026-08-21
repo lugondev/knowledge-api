@@ -8,6 +8,13 @@ from dataclasses import dataclass, field
 DEFAULT_DATABASE_URL = "sqlite+aiosqlite:///./kbase.db"
 DEFAULT_MAX_UPLOAD_BYTES = 20_000_000
 
+#: Inputs per /embeddings request. Providers cap this and they do not agree:
+#: OpenAI takes hundreds, DashScope's text-embedding-v3 rejects anything over
+#: 10 with a 400. Hardcoded at 32 this made a whole provider unusable in a way
+#: that only showed on indexing -- a one-item query embed still worked, so the
+#: service looked healthy while every document failed.
+DEFAULT_EMBED_BATCH = 32
+
 #: pgvector will not build an HNSW index on a wider vector. Above this a column
 #: still stores and still searches -- by scanning, which is the thing pgvector
 #: was brought in to stop doing.
@@ -40,6 +47,7 @@ class Settings:
     embed_base_url: str = ""
     embed_api_key: str = ""
     embed_model: str = ""
+    embed_batch: int = DEFAULT_EMBED_BATCH
     max_upload_bytes: int = DEFAULT_MAX_UPLOAD_BYTES
     docs_enabled: bool = True
     embed_dim: int = 0
@@ -51,6 +59,11 @@ class Settings:
             max_upload = int(raw_max) if raw_max else DEFAULT_MAX_UPLOAD_BYTES
         except ValueError:
             max_upload = DEFAULT_MAX_UPLOAD_BYTES
+        raw_batch = env.get("KB_EMBED_BATCH", "").strip()
+        try:
+            embed_batch = int(raw_batch) if raw_batch else DEFAULT_EMBED_BATCH
+        except ValueError:
+            embed_batch = -1  # invalid, and `check` says so rather than guessing
         raw_dim = env.get("KB_EMBED_DIM", "").strip()
         try:
             embed_dim = int(raw_dim) if raw_dim else 0
@@ -62,6 +75,7 @@ class Settings:
             embed_base_url=env.get("KB_EMBED_BASE_URL", "").strip(),
             embed_api_key=env.get("KB_EMBED_API_KEY", "").strip(),
             embed_model=env.get("KB_EMBED_MODEL", "").strip(),
+            embed_batch=embed_batch,
             max_upload_bytes=max_upload,
             docs_enabled=env.get("KB_DOCS", "").strip().lower() not in {"false", "0", "no"},
             embed_dim=embed_dim,
@@ -76,6 +90,8 @@ class Settings:
             problems.append("KB_EMBED_BASE_URL is unset: nothing can be indexed or searched")
         if not self.embed_model:
             problems.append("KB_EMBED_MODEL is unset: nothing can be indexed or searched")
+        if self.embed_batch <= 0:
+            problems.append("KB_EMBED_BATCH must be a positive integer")
         if self.max_upload_bytes <= 0:
             problems.append("KB_MAX_UPLOAD_BYTES must be a positive integer")
         if self.embed_dim < 0:
